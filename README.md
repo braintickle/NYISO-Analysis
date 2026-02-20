@@ -1,4 +1,4 @@
-# ⚡ NYISO Energy Data Pipeline & EDA Dashboard
+# NYISO Energy Data Pipeline & EDA Dashboard
 
 > **Project 01 of 4** in a Data Science portfolio series using NYISO wholesale electricity market data.
 
