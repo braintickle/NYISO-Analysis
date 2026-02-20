@@ -49,23 +49,27 @@ def build_url(dataset: str, date: datetime) -> str:
     """
     Build the NYISO CSV download URL for a given dataset and date.
 
-    NYISO URL pattern:
+    Most datasets use monthly ZIP files:
       https://mis.nyiso.com/public/csv/{path}/{YYYYMMDD}{path}_csv.zip
 
-    Example:
-      https://mis.nyiso.com/public/csv/pal/20240101pal_csv.zip
+    Exception — damlbmp uses direct monthly CSV with _zone suffix:
+      http://mis.nyiso.com/public/csv/damlbmp/{YYYYMMDD}damlbmp_zone_csv.zip
     """
     path = DATASET_PATHS[dataset]
     date_str = date.strftime("%Y%m%d")
+
+    if dataset == "lmp_dayahead":
+        # LMP day-ahead uses a different naming convention
+        return f"http://mis.nyiso.com/public/csv/{path}/{date_str}{path}_zone_csv.zip"
+
     return f"{BASE_URL}/{path}/{date_str}{path}_csv.zip"
 
 
 def fetch_day(dataset: str, date: datetime, retries: int = 3) -> pd.DataFrame:
     """
-    Download and parse one day of NYISO data for a given dataset.
+    Download and parse one month of NYISO data for a given dataset.
 
-    Returns a DataFrame or empty DataFrame if the file is unavailable
-    (e.g., future dates, weekends for some datasets).
+    Returns a DataFrame or empty DataFrame if the file is unavailable.
     """
     url = build_url(dataset, date)
     logger.info(f"Fetching {dataset} for {date.strftime('%Y-%m-%d')} ...")
@@ -78,7 +82,7 @@ def fetch_day(dataset: str, date: datetime, retries: int = 3) -> pd.DataFrame:
                 return pd.DataFrame()
             response.raise_for_status()
 
-            # NYISO zips contain one or more CSVs
+            # All NYISO datasets are zipped — extract all CSVs inside
             with zipfile.ZipFile(io.BytesIO(response.content)) as z:
                 csv_files = [f for f in z.namelist() if f.endswith(".csv")]
                 frames = [pd.read_csv(z.open(f)) for f in csv_files]
@@ -90,7 +94,7 @@ def fetch_day(dataset: str, date: datetime, retries: int = 3) -> pd.DataFrame:
         except requests.exceptions.RequestException as e:
             logger.warning(f"  Attempt {attempt+1} failed: {e}")
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)  # exponential backoff
+                time.sleep(2 ** attempt)
 
     logger.error(f"  All retries failed for {dataset} on {date.strftime('%Y-%m-%d')}")
     return pd.DataFrame()
@@ -104,32 +108,41 @@ def fetch_date_range(
     pause: float = 0.5
 ) -> pd.DataFrame:
     """
-    Fetch multiple days of data and concatenate into one DataFrame.
+    Fetch multiple months of data and concatenate into one DataFrame.
+
+    IMPORTANT: NYISO publishes monthly ZIP files, not daily ones.
+    Each ZIP contains all days in that month.
+    We always request the 1st of each month to get the full monthly file.
 
     Args:
         dataset   : One of the keys in DATASET_PATHS
-        start     : Start date (inclusive)
+        start     : Start date (we snap to the 1st of this month)
         end       : End date (inclusive)
-        save_dir  : If provided, saves daily raw CSVs here for caching
-        pause     : Seconds to wait between requests (be polite to NYISO servers)
+        save_dir  : If provided, caches monthly parquets locally
+        pause     : Seconds to wait between requests
 
     Returns:
         Combined DataFrame for the full date range.
     """
     all_frames = []
-    current = start
+
+    # Snap to the 1st of the start month
+    current = start.replace(day=1)
 
     while current <= end:
         # Check local cache first to avoid re-downloading
         if save_dir:
             cache_path = os.path.join(
                 save_dir,
-                f"{dataset}_{current.strftime('%Y%m%d')}.parquet"
+                f"{dataset}_{current.strftime('%Y%m')}.parquet"
             )
             if os.path.exists(cache_path):
                 logger.info(f"  Loading from cache: {cache_path}")
                 all_frames.append(pd.read_parquet(cache_path))
-                current += timedelta(days=1)
+                # Advance to next month
+                month = current.month + 1 if current.month < 12 else 1
+                year  = current.year if current.month < 12 else current.year + 1
+                current = current.replace(year=year, month=month, day=1)
                 continue
 
         df = fetch_day(dataset, current)
@@ -140,7 +153,10 @@ def fetch_date_range(
                 df.to_parquet(cache_path, index=False)
             all_frames.append(df)
 
-        current += timedelta(days=1)
+        # Advance to next month
+        month = current.month + 1 if current.month < 12 else 1
+        year  = current.year if current.month < 12 else current.year + 1
+        current = current.replace(year=year, month=month, day=1)
         time.sleep(pause)
 
     if not all_frames:
