@@ -1,19 +1,11 @@
 # NYISO Energy Data Pipeline & EDA Dashboard
 
-> **Project 01 of 4** in a Data Science portfolio series using NYISO wholesale electricity market data.
-
 ---
 
 ## Overview
 
 This project builds a **production-style data pipeline** that ingests live data from the [NYISO public CSV API](https://www.nyiso.com/custom-reports), cleans and stores it locally, and surfaces insights through an interactive **Streamlit dashboard**.
 
-The goal is to demonstrate:
-- Working with real, production-quality time series data (not Kaggle CSVs)
-- Building a reusable ETL pipeline with local caching
-- Generating domain-relevant insights from energy market data
-
-This pipeline feeds directly into **Project 02** (Day-Ahead Load Forecasting) and **Project 03** (LMP Anomaly Detection).
 
 ---
 
@@ -38,7 +30,7 @@ This pipeline feeds directly into **Project 02** (Day-Ahead Load Forecasting) an
 ## Project Structure
 
 ```
-nyiso_project_01/
+nyiso-analysis/
 │
 ├── src/
 │   ├── nyiso_client.py        # NYISO API fetcher with caching + retry logic
@@ -96,7 +88,7 @@ All data is fetched from `https://mis.nyiso.com/public/csv/`.
 
 NYISO (New York Independent System Operator) manages the wholesale electricity grid for New York State — dispatching ~40 GW of capacity and settling ~$10B in annual transactions.
 
-**Why this data matters for DS:**
+**Why this data matters:**
 - **Load forecasting** is the #1 grid planning problem. A 1% MAPE improvement on a 25 GW system saves millions in reserve procurement.
 - **LMP price prediction** drives trading, hedging, and demand response program design.
 - **Fuel mix signals** are the real-time carbon intensity of the grid — increasingly used in ESG dashboards and demand flexibility programs.
@@ -105,21 +97,8 @@ This project is built from an M&V (Measurement & Verification) practitioner's pe
 
 ---
 
-## Next in This Series
-
-| Project | Topic | Status |
-|---------|-------|--------|
-| **01** | Data Pipeline & EDA *(this repo)* | ✅ Complete |
-| **02** | Day-Ahead Load Forecasting (XGBoost vs Prophet vs LSTM) | 🔄 In progress |
-| **03** | LMP Price Spike Anomaly Detection | 📋 Planned |
-| **04** | ML-Based Energy Savings Estimator (Capstone) | 📋 Planned |
-
----
-
 ## Tech Stack
 
 `Python 3.11` · `pandas` · `numpy` · `requests` · `pyarrow` · `plotly` · `streamlit`
 
 ---
-
-*Built as part of a Data Science portfolio transition from energy M&V consulting.*
