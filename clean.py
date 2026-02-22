@@ -106,7 +106,10 @@ def clean(df: pd.DataFrame, dataset: str) -> pd.DataFrame:
         df.reset_index(drop=True, inplace=True)
 
     # 7. Flag outliers (values beyond 4 standard deviations) — don't remove, just flag
-    numeric_cols = [c for c in df.columns if c not in ("timestamp", "zone", "fuel_type")]
+    # Only flag outliers on columns we actually care about
+    cols_to_check = ["lmp_total", "lmp_losses", "lmp_congestion", "load_mw", "gen_mw"]
+    numeric_cols = [c for c in cols_to_check if c in df.columns]
+    
     for col in numeric_cols:
         if df[col].notna().sum() > 10:
             mean, std = df[col].mean(), df[col].std()
