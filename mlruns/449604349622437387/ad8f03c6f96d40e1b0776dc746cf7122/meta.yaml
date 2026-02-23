@@ -1,0 +1,14 @@
+artifact_uri: file:///C:/Users/rahi/nyiso/NYISO-analysis/notebooks/../mlruns/449604349622437387/ad8f03c6f96d40e1b0776dc746cf7122/artifacts
+end_time: 1771817080016
+entry_point_name: ''
+experiment_id: '449604349622437387'
+lifecycle_stage: active
+run_id: ad8f03c6f96d40e1b0776dc746cf7122
+run_name: SARIMA_N.Y.C.
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1771817038778
+status: 3
+tags: []
+user_id: rahi

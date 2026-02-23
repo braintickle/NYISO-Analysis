@@ -1,0 +1,22 @@
+artifact_path: file:///C:/Users/rahi/nyiso/NYISO-analysis/notebooks/../mlruns/449604349622437387/models/m-a4ce526a64ce41a5b259479d2ef0c2b1/artifacts
+flavors:
+  python_function:
+    data: model.ubj
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.xgboost
+    python_version: 3.11.14
+  xgboost:
+    code: null
+    data: model.ubj
+    model_class: xgboost.sklearn.XGBRegressor
+    model_format: ubj
+    xgb_version: 3.2.0
+mlflow_version: 3.10.0
+model_id: m-a4ce526a64ce41a5b259479d2ef0c2b1
+model_size_bytes: 1771809
+model_uuid: m-a4ce526a64ce41a5b259479d2ef0c2b1
+prompts: null
+run_id: 42e121b989144f58b635e4c0967917f9
+utc_time_created: '2026-02-23 04:26:45.415228'

@@ -1,0 +1,7 @@
+artifact_location: file:///C:/Users/rahi/nyiso/NYISO-analysis/notebooks/../mlruns/449604349622437387
+creation_time: 1771817011770
+experiment_id: '449604349622437387'
+last_update_time: 1771817011770
+lifecycle_stage: active
+name: nyiso_load_forecasting
+workspace: default

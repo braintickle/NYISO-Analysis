@@ -1,0 +1,10 @@
+artifact_location: file:///C:/Users/rahi/nyiso/NYISO-analysis/notebooks/../mlruns/449604349622437387/models/m-8f127c8d78f041faa3f56aee8177709f/artifacts
+creation_timestamp: 1771820824631
+experiment_id: '449604349622437387'
+last_updated_timestamp: 1771820836253
+model_id: m-8f127c8d78f041faa3f56aee8177709f
+model_type: null
+name: xgboost_LONGIL
+source_run_id: 1071fa084b2a4bfc9573b0016a27a359
+status: 2
+status_message: null

@@ -81,8 +81,10 @@ def clean(df: pd.DataFrame, dataset: str) -> pd.DataFrame:
         # Localize to Eastern time (NYISO operates on US/Eastern)
         if df["timestamp"].dt.tz is None:
             df["timestamp"] = df["timestamp"].dt.tz_localize(
-                "US/Eastern", ambiguous="infer", nonexistent="shift_forward"
+            "US/Eastern", ambiguous="NaT", nonexistent="shift_forward"
             )
+            # Drop the ambiguous DST timestamps (affects ~2 hours per year)
+            df = df.dropna(subset=["timestamp"])
 
     # 3. Standardize zone names (strip whitespace, uppercase)
     if "zone" in df.columns:

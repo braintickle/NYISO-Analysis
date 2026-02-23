@@ -1,0 +1,14 @@
+artifact_uri: file:///C:/Users/rahi/nyiso/NYISO-analysis/notebooks/../mlruns/449604349622437387/42e121b989144f58b635e4c0967917f9/artifacts
+end_time: 1771820822706
+entry_point_name: ''
+experiment_id: '449604349622437387'
+lifecycle_stage: active
+run_id: 42e121b989144f58b635e4c0967917f9
+run_name: XGBoost_N.Y.C.
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1771820802878
+status: 3
+tags: []
+user_id: rahi

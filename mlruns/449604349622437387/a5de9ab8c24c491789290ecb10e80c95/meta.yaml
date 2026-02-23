@@ -1,0 +1,14 @@
+artifact_uri: file:///C:/Users/rahi/nyiso/NYISO-analysis/notebooks/../mlruns/449604349622437387/a5de9ab8c24c491789290ecb10e80c95/artifacts
+end_time: 1771820242913
+entry_point_name: ''
+experiment_id: '449604349622437387'
+lifecycle_stage: active
+run_id: a5de9ab8c24c491789290ecb10e80c95
+run_name: Prophet_N.Y.C.
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1771820227879
+status: 3
+tags: []
+user_id: rahi

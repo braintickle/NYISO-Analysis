@@ -1,0 +1,14 @@
+artifact_uri: file:///C:/Users/rahi/nyiso/NYISO-analysis/notebooks/../mlruns/449604349622437387/ccfd9b62eaa14212aaba02593fb52154/artifacts
+end_time: 1771817926393
+entry_point_name: ''
+experiment_id: '449604349622437387'
+lifecycle_stage: active
+run_id: ccfd9b62eaa14212aaba02593fb52154
+run_name: Prophet_LONGIL
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1771817916035
+status: 3
+tags: []
+user_id: rahi
