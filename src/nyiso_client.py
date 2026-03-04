@@ -50,10 +50,10 @@ def build_url(dataset: str, date: datetime) -> str:
     Build the NYISO CSV download URL for a given dataset and date.
 
     Most datasets use monthly ZIP files:
-      https://mis.nyiso.com/public/csv/{path}/{YYYYMMDD}{path}_csv.zip
+    http://mis.nyiso.com/public/csv/{path}/{YYYYMMDD}{path}_csv.zip
 
-    Exception — damlbmp uses direct monthly CSV with _zone suffix:
-      http://mis.nyiso.com/public/csv/damlbmp/{YYYYMMDD}damlbmp_zone_csv.zip
+    Exception — lmp_dayahead and lmp_realtime use _zone suffix:
+    http://mis.nyiso.com/public/csv/{path}/{YYYYMMDD}{path}_zone_csv.zip
     """
     path = DATASET_PATHS[dataset]
     date_str = date.strftime("%Y%m%d")

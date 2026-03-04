@@ -106,6 +106,13 @@ nyiso-analysis/
 ├── requirements.txt
 └── README.md
 ```
+---
+
+## View Notebooks
+
+- [01 EDA](https://nbviewer.org/github/braintickle/NYISO-analysis/blob/main/notebooks/01_eda.ipynb)
+- [02 Forecasting](https://nbviewer.org/github/braintickle/NYISO-analysis/blob/main/notebooks/02_forecasting.ipynb)
+- [03 BESS Optimization](https://nbviewer.org/github/braintickle/NYISO-analysis/blob/main/notebooks/03_bess_optimization.ipynb)
 
 ---
 
