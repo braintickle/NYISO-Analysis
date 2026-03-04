@@ -1,0 +1,14 @@
+artifact_uri: file:///C:/Users/rahi/nyiso/NYISO-analysis/notebooks/../mlruns/449604349622437387/bb710628fd3146ccba1bd43186cc3db6/artifacts
+end_time: 1772600905347
+entry_point_name: ''
+experiment_id: '449604349622437387'
+lifecycle_stage: active
+run_id: bb710628fd3146ccba1bd43186cc3db6
+run_name: XGBoost_LONGIL
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1772600890621
+status: 3
+tags: []
+user_id: rahi

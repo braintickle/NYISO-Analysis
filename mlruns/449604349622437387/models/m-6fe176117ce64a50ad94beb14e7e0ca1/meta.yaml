@@ -1,0 +1,10 @@
+artifact_location: file:///C:/Users/rahi/nyiso/NYISO-analysis/notebooks/../mlruns/449604349622437387/models/m-6fe176117ce64a50ad94beb14e7e0ca1/artifacts
+creation_timestamp: 1772600866155
+experiment_id: '449604349622437387'
+last_updated_timestamp: 1772600890559
+model_id: m-6fe176117ce64a50ad94beb14e7e0ca1
+model_type: null
+name: xgboost_NYC
+source_run_id: 611ca29088224e5eacebcc7df1f7f4c0
+status: 2
+status_message: null

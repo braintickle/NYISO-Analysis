@@ -63,21 +63,27 @@ Built as a ground-up learning project to understand NYISO market structure, powe
 | Basis P&L (RT vs DA) | — | +$681,199 |
 | Basis P&L as % of DA energy | — | 9.1% |
 
+#### Forecasted Prices vs Perfect Foresight
+
+| Scenario | Annual Revenue | vs Perfect |
+|----------|---------------|------------|
+| Perfect foresight + ICAP | $14,614,618 | — |
+| XGBoost forecasted prices + ICAP | $14,064,097 | -7.6% |
+| Forecast error penalty | $550,522 | 7.6% of perfect |
+
 **Key findings:**
 - LP optimization outperforms naive dispatch by 62.6% — quantifies the value of constrained optimization over heuristics
 - ICAP contributed ~19% of total revenue using real 2025 NYC Zone J strip auction prices ($6.15–$13.89/kW-month)
 - NYC ICAP prices are 3x rest-of-state — location premium from transmission-constrained load pocket
 - Positive basis P&L of $681K means RT prices were favorable vs DA plan — summer 2025 RT spikes worked in the battery's favor
 - Dynamic ICAP commitment model balances two competing signals: price volatility (high vol → reduce ICAP, keep MW for arbitrage) and ICAP clearing price (high price → increase ICAP commitment)
+- 12.89% LMP forecast MAPE translates to only 7.6% revenue penalty — the optimizer naturally discards weak price signals, making dispatch decisions robust to moderate forecast error.
 
 **Model assumptions and limitations:**
-- DA energy optimization uses perfect price foresight — real operations use forecasted prices
 - Charge rate degradation modeled as linearized CC/CV approximation above 80% SOC
-- Ancillary services (regulation, spinning reserve) not included — would add meaningful revenue
+- Ancillary services (regulation, spinning reserve) not included and could add meaningful revenue
 - Battery cycle degradation costs not modeled
 - ICAP co-optimization enforces SOC reservation during peak hours (2–6PM) to honor capacity obligations
-
-**Next step:** Replace perfect DA price foresight with XGBoost forecasted prices from Project 02 to evaluate how forecast error propagates into dispatch decisions and annual revenue — a realistic backtest of the full pipeline.
 
 ---
 
