@@ -52,6 +52,17 @@ COLUMN_MAPS = {
         "Fuel Category":    "fuel_type",
         "Gen MW":           "gen_mw",
     },
+
+    "lmp_realtime": {
+    "Time Stamp":                          "timestamp",
+    "Name":                                "zone",
+    "PTID":                                "ptid",
+    "LBMP ($/MWHr)":                       "lmp_total",
+    "Marginal Cost Losses ($/MWHr)":       "lmp_losses",
+    "Marginal Cost Congestion ($/MWHr)":   "lmp_congestion",
+    },
+
+
 }
 
 

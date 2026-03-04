@@ -62,6 +62,9 @@ def build_url(dataset: str, date: datetime) -> str:
         # LMP day-ahead uses a different naming convention
         return f"http://mis.nyiso.com/public/csv/{path}/{date_str}{path}_zone_csv.zip"
 
+    if dataset == "lmp_realtime":
+        return f"http://mis.nyiso.com/public/csv/{path}/{date_str}{path}_zone_csv.zip"
+
     return f"{BASE_URL}/{path}/{date_str}{path}_csv.zip"
 
 
