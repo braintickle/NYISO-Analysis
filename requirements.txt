@@ -33,3 +33,7 @@ holidays>=0.46
 
 # Weather
 openmeteo-requests>=1.2
+
+# Postgres (Project 04)
+psycopg2-binary>=2.9
+python-dotenv>=1.0
