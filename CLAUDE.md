@@ -67,18 +67,29 @@ pandas, numpy, duckdb, xgboost, pulp, prophet, statsmodels, plotly, streamlit, m
 - Train: 2024, Test: 2025 (temporal split, no leakage)
 - Most important feature: `lag_168h` (same hour last week)
 
-**LMP (NYC DA):**
-- XGBoost MAPE: 12.89%
+**LMP (NYC DA) — static model:**
+- XGBoost MAPE: 12.89% (static, trained on 2024 only)
 - Mean error: +5.19 $/MWh (systematic underprediction)
 - Max error: +229 $/MWh (extreme spikes missed)
 
-**Feature set (20 features):**
+**LMP rolling day-ahead simulation (Section 15):**
+- R1 (no gas, retrain every 30 days): MAPE=11.60% (-1.76pp vs static)
+- R2 (+gas_price_lag1d): MAPE=12.30% — gas still hurts (+0.70pp vs R1)
+- Gas degradation shrinks from +4.71pp (static) → +0.70pp (rolling): covariate shift
+  partially mitigated, but Jan–Mar still affected (trailing window anchored in 2024 regime)
+- Production model: R1 rolling, no gas features
+
+**Gas ablation (Section 14):**
+- S2 +price_level: 18.07% — covariate shift (2024 mean $2.25 → 2025 mean $3.54/MMBtu)
+- S3 +pct_change: 13.34% — stationary but negligible signal (existing lags cover it)
+- Conclusion: gas features do not improve hourly LMP MAPE given existing price history lags
+
+**Feature set (19 LMP features):**
 - Calendar: hour, dow, month, quarter, week_of_year, is_weekend, is_holiday
 - Weather: temp_f, feels_like_f, humidity_pct, wind_speed_kmh
 - Degree days: HDD, CDD (balance point 65°F, IPMVP standard)
-- Lags: load_lag_24h, load_lag_48h, load_lag_168h
-- Rolling: load_roll_mean_24h, load_roll_std_24h
-- LMP-specific: lmp_lag_24h/48h/168h, lmp_roll_mean/std_24h, lmp_spike_24h
+- LMP lags: lmp_lag_24h, lmp_lag_48h, lmp_lag_168h
+- LMP rolling: lmp_roll_mean_24h, lmp_roll_std_24h, lmp_spike_24h
 
 **MLflow:** experiment tracking at `../mlruns`
 
