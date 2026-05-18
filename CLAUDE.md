@@ -8,7 +8,8 @@
 
 NYISO power markets analysis portfolio demonstrating data engineering, ML forecasting, optimization, and visualization. Built to showcase energy data science skills for power markets analyst roles (e.g., Modo Energy).
 
-**GitHub:** https://github.com/braintickle/NYISO-analysis
+**GitHub:** https://github.com/braintickle/NYISO-Analysis
+**Live dashboard:** https://nyiso.rahishah.com
 **Environment:** `conda activate nyiso` | Python 3.11
 
 ## Repository Structure
@@ -21,18 +22,25 @@ nyiso-analysis/
 │   ├── migrate_to_postgres.py # One-time migration: parquets → Supabase Postgres
 │   └── generate_synthetic.py  # Synthetic data for Streamlit Cloud deploy
 ├── lambda/                    # AWS Lambda functions (Project 04)
-│   ├── handler.py             # Entry points: ingest_load_fuel, ingest_lmp, run_bess_dispatch
+│   ├── handler.py             # Entry points: ingest_load_fuel, ingest_lmp,
+│   │                          #   run_bess_dispatch, update_dns
 │   ├── ingest.py              # NYISO fetch + clean + Postgres insert
 │   ├── features.py            # Feature engineering (lags, rolling, weather, calendar)
 │   ├── inference.py           # XGBoost model loading + prediction + forecast writer
 │   ├── bess_dispatch.py       # PuLP LP optimizer + Postgres writer
+│   ├── Dockerfile             # Lambda container image (alternative to zip deploy)
 │   └── requirements.txt       # Lambda-specific dependencies
 ├── scripts/
-│   └── export_models.py       # Train XGBoost models + save .joblib artifacts to models/
+│   ├── export_models.py       # Train XGBoost models + save .joblib artifacts to models/
+│   ├── backfill_2026.py       # One-time backfill: Jan–May 2026 for all 4 datasets
+│   ├── deploy_lambda_zip.sh   # Lambda zip deploy (layer via S3, function via zip)
+│   ├── deploy_lambda.sh       # Lambda container deploy (alternative, needs Docker)
+│   └── setup_ecs.sh           # One-time ECS infrastructure setup
 ├── models/                    # Trained model artifacts (gitignored); run export_models.py
 │   ├── load_model_nyc.joblib
 │   ├── load_model_longil.joblib
-│   └── lmp_model_nyc.joblib
+│   ├── lmp_model_nyc.joblib
+│   └── lmp_r1_production.ubj  # Rolling R1 production model (XGBoost binary format)
 ├── sql/
 │   └── schema.sql             # Supabase Postgres DDL (8 tables)
 ├── notebooks/
@@ -41,10 +49,15 @@ nyiso-analysis/
 │   └── 03_bess_optimization.ipynb  # BESS dispatch LP optimizer
 ├── app/
 │   └── app.py                 # Streamlit dashboard (Postgres-first, parquet fallback)
+├── iam/
+│   └── nyiso-deploy-policy.json  # IAM policy for nyiso-deploy user
 ├── data/
 │   ├── raw/                   # Cached monthly parquets (gitignored)
 │   └── processed/             # Clean analysis-ready parquets (gitignored)
-├── Dockerfile                 # Streamlit app for ECS Fargate
+├── .github/
+│   └── workflows/
+│       └── deploy.yml         # CI/CD: push to main → build linux/amd64 image → ECS deploy
+├── Dockerfile                 # Streamlit app for ECS Fargate (root level)
 ├── requirements.txt
 └── README.md
 ```
@@ -53,24 +66,26 @@ nyiso-analysis/
 
 Four datasets from NYISO public CSV API (no key required):
 
-| Dataset        | NYISO endpoint | Resolution | File                          |
-|----------------|---------------|------------|-------------------------------|
-| load_actual    | pal           | 5-min      | data/processed/load_actual.parquet |
-| lmp_dayahead   | damlbmp       | hourly     | data/processed/lmp_dayahead.parquet |
-| lmp_realtime   | rtlbmp        | hourly     | data/processed/lmp_realtime.parquet |
-| fuel_mix       | rtfuelmix     | 5-min      | data/processed/fuel_mix.parquet |
+| Dataset      | NYISO endpoint | Resolution | Postgres table  |
+|--------------|---------------|------------|-----------------|
+| load_actual  | pal           | 5-min      | load_actual     |
+| lmp_dayahead | damlbmp       | hourly     | lmp_dayahead    |
+| lmp_realtime | rtlbmp        | hourly     | lmp_realtime    |
+| fuel_mix     | rtfuelmix     | 5-min      | fuel_mix        |
 
-Also generated:
-- `data/processed/lmp_forecast_2025.parquet` — XGBoost DA LMP forecasts
-- `data/processed/system_load.parquet`
-
-**Date range:** 2024–2025 full years
+**Date range:** 2024-01-01 through present (Lambda ingests continuously)
 **Zones:** All 11 NYISO zones. Primary analysis on N.Y.C. (Zone J) and LONGIL (Zone K).
-**Query engine:** DuckDB for all parquet access (predicate pushdown for memory efficiency).
+**Query engine:** DuckDB for local/notebook parquet access; psycopg2 for cloud Postgres.
+
+### NYISO raw CSV column names (important for cleaning)
+- `pal` (load): columns are `Time Stamp, Time Zone, Name, PTID, Load` — "Load" has no "MW" suffix
+- `damlbmp`/`rtlbmp` (LMP): columns are `Time Stamp, Name, PTID, LBMP ($/MWHr), Marginal Cost Losses ($/MWHr), Marginal Cost Congestion ($/MWHr)`
+- `rtfuelmix` (fuel): columns are `Time Stamp, Time Zone, Fuel Category, Gen MW`
+- The `_clean_load` and `_clean_lmp` detectors in `lambda/ingest.py` were fixed to match these column names exactly.
 
 ## Key Packages
 
-pandas, numpy, duckdb, xgboost, pulp, prophet, statsmodels, plotly, streamlit, mlflow, shap, scikit-learn, holidays, openmeteo-requests
+pandas, numpy, duckdb, xgboost, pulp, prophet, statsmodels, plotly, streamlit, mlflow, shap, scikit-learn, holidays, openmeteo-requests, psycopg2, boto3
 
 ## Project Results Summary
 
@@ -127,53 +142,129 @@ pandas, numpy, duckdb, xgboost, pulp, prophet, statsmodels, plotly, streamlit, m
 - Forecast error penalty: $550,522 (7.6% of perfect)
 - Basis P&L (RT vs DA settlement): $681,199
 - Optimizer: PuLP LP with CBC solver, Zone J, full year 2025
-- ICAP: real 2025 NYC Zone J strip auction prices, dynamic commitment balancing volatility signal vs clearing price
+- ICAP: real 2025 NYC Zone J strip auction prices, dynamic commitment
 
-## Active Project: 04 — Live Dashboard
-
-**Goal:** Real-time NYISO dashboard that turns analysis into a product.
+## Project 04 — Live Dashboard (COMPLETE)
 
 ### Architecture
 
 ```
 NYISO Public CSV API
       ↓ (EventBridge cron: 5min for load/fuel, 1hr for LMP)
-AWS Lambda
+AWS Lambda  [nyiso-ingestor]
   → fetch → clean → compute features → XGBoost inference
       ↓
-Supabase Postgres (free tier, 500MB)
+Supabase Postgres (free tier)
   tables: load_actual, lmp_dayahead, lmp_realtime, fuel_mix,
           load_forecast, lmp_forecast, bess_dispatch
       ↓
-Streamlit on AWS ECS Fargate
+Streamlit on AWS ECS Fargate  [nyiso-dashboard cluster]
   → queries Postgres → renders dashboard
+      ↓
+Cloudflare (proxy + HTTPS)
+  → nyiso.rahishah.com
+      ↑
+EventBridge (ECS Task State Change → Lambda → Cloudflare API)
+  → auto-updates DNS A record on every task restart
 ```
 
-### Cloud Data Layer — Supabase Postgres
-- Migrate from local DuckDB/parquet to Supabase Postgres
-- Swap DuckDB queries for psycopg2/SQLAlchemy against Postgres
-- Schema mirrors existing parquet structure
-- Connection via `DATABASE_URL` env var (secrets in AWS Secrets Manager)
+### AWS Infrastructure (all in us-east-1)
 
-### Ingestion — AWS Lambda + EventBridge
-- Refactor `src/nyiso_client.py` into Lambda handler
-- Schedule: every 5 min (load_actual, fuel_mix), every 1 hr (lmp_dayahead, lmp_realtime)
-- Lambda computes lag/rolling features from recent Postgres rows
-- Trained XGBoost model artifact packaged with Lambda (static; retrain locally, redeploy)
-- Lambda writes forecast rows to `load_forecast` / `lmp_forecast` tables
-- BESS dispatch recommendation generated from latest DA LMP forecast
+| Resource | Name / ID |
+|----------|-----------|
+| ECS Cluster | `nyiso-dashboard` |
+| ECS Service | `nyiso-dashboard` (desired=1, Fargate) |
+| ECR Repository | `nyiso-streamlit` |
+| Lambda Function | `nyiso-ingestor` (Python 3.11, 1024MB, 300s timeout) |
+| Lambda Layer | `nyiso-deps:1` (pandas, xgboost, psycopg2, pulp, holidays — 234MB unzipped) |
+| Lambda Layer source | `s3://nyiso-artifacts-358592704128/nyiso-deps-layer.zip` |
+| IAM roles | `nyiso-ecs-exec-role` (ECS task), `nyiso-lambda-role` (Lambda exec) |
+| Security Group | `sg-0a59ca39eb5727332` — TCP 8501 inbound 0.0.0.0/0 |
+| VPC | `vpc-06b70275d8de36415` |
+| Subnets | `subnet-060f12554b8f1ea8c` (us-east-1a), `subnet-0397783105cb80f38` (us-east-1b) |
+| CloudWatch Logs | `/ecs/nyiso-dashboard` |
+| S3 Bucket | `nyiso-artifacts-358592704128` (Lambda layer storage) |
 
-### Deployment — AWS ECS Fargate
-- Dockerized Streamlit app
-- Container image pushed to ECR
-- Fargate service with public URL
+### EventBridge Rules
 
-### Dashboard Components
-1. Current actual load vs XGBoost forecast
-2. Live LMP by zone (heatmap)
-3. DA/RT spread tracker
-4. BESS dispatch recommendation for today ("based on today's DA prices, optimal schedule is...")
-5. YTD revenue tracker vs naive benchmark
+| Rule | Schedule / Pattern | Lambda input |
+|------|-------------------|--------------|
+| `nyiso-ingest-load-fuel` | rate(5 minutes) | `{"task": "ingest_load_fuel"}` |
+| `nyiso-ingest-lmp` | rate(1 hour) | `{"task": "ingest_lmp"}` |
+| `nyiso-bess-dispatch` | cron(0 13 * * ? *) — 1pm UTC / 9am ET | `{"task": "bess_dispatch"}` |
+| `nyiso-ecs-task-running` | ECS Task State Change, lastStatus=RUNNING | full ECS event (no Input override) |
+
+### DNS / HTTPS Setup
+
+- Domain: `rahishah.com` on Namecheap; DNS managed by Cloudflare (free plan)
+- `nyiso.rahishah.com` → Cloudflare A record, proxy enabled (orange cloud)
+- Cloudflare proxy provides HTTPS with shared certificate — no ACM needed
+- `nyiso-ecs-task-running` EventBridge rule fires on every Fargate task restart →
+  Lambda reads ENI from event → EC2 resolves public IP → Cloudflare API updates A record
+- DNS self-heals within ~30 seconds of any task restart at $0/month
+- Cloudflare env vars in Lambda: `CF_API_TOKEN`, `CF_ZONE_ID`, `CF_RECORD_NAME=nyiso.rahishah.com`
+
+### Lambda Handler Tasks
+
+`lambda/handler.py` routes on `event['task']` for cron events, and on `event['detail-type'] == 'ECS Task State Change'` for DNS updates:
+
+| Task key | Function | Trigger |
+|----------|----------|---------|
+| `ingest_load_fuel` | Fetch load_actual + fuel_mix, insert to Postgres | Every 5 min |
+| `ingest_lmp` | Fetch DA+RT LMP, run XGBoost forecasts, write forecasts | Every hour |
+| `bess_dispatch` | Fetch today's DA LMP, LP optimize, write bess_dispatch | Daily 9am ET |
+| *(ECS event)* | `update_dns` — patch Cloudflare A record with new task IP | ECS task RUNNING |
+
+### Lambda Layer Notes
+
+- scipy and sklearn were stripped from the layer (not used at Lambda inference time)
+- sklearn is only needed locally for `scripts/export_models.py` (training)
+- Layer exceeds 50MB zip limit — uploaded to S3, then published via `--content S3Bucket=...`
+- Layer permissions: `lambda:GetLayerVersion` must be on versioned ARN `layer:nyiso-*:*`, not unversioned `layer:nyiso-*`
+
+### CI/CD Pipeline (`.github/workflows/deploy.yml`)
+
+Triggers on push to `main` when `app/`, `src/`, `requirements.txt`, `Dockerfile`, or the workflow file changes:
+1. Configure AWS credentials (`nyiso-deploy` IAM user)
+2. Login to ECR
+3. `docker build --platform linux/amd64` (Linux build on GitHub runner — no local Docker needed)
+4. Push image tagged with git SHA + `latest`
+5. Render new ECS task definition with updated image + `DATABASE_URL` secret
+6. Deploy to ECS, wait for stability
+7. Print public IP to job summary
+
+GitHub Secrets required: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `DATABASE_URL`
+
+### Known Issues Fixed During Deployment
+
+1. **Lambda column detection bugs** (`lambda/ingest.py`):
+   - `_clean_load`: NYISO `pal` CSV has column `"Load"` (not `"Load MW"`) — fixed detector to match bare `"Load"`
+   - `_clean_lmp`: NYISO LMP CSV has column `"LBMP ($/MWHr)"` — fixed detector from exact match `"lbmp"` to `"lbmp" in column.lower()`
+   - `_bulk_insert`: numpy int64 scalars not serializable by psycopg2 — added `_to_native()` converter
+
+2. **Postgres query window** (`app/app.py`):
+   - Original 90-day cutoff excluded all 2024–2025 historical data (>18 months old)
+   - Extended to 548 days to cover full dataset; tighten back to 90 days once Lambda has built up 3 months of live data
+
+3. **Streamlit multiselect crash** (`app/app.py` line 186):
+   - Default zones `["N.Y.C.", "LONGIL", "CAPITL"]` crashed when `df_load` was empty
+   - Fixed: filter defaults to zones that exist in loaded data, fall back to first 3 available
+
+4. **Lambda layer size**: 430MB → 234MB by removing scipy + sklearn (not needed at inference time)
+
+5. **ECS CloudWatch log group**: `setup_ecs.sh` silently failed to create `/ecs/nyiso-dashboard` due to Git Bash expanding `/ecs/` as a Windows path — created via boto3 instead
+
+6. **IAM permissions discovered incrementally**:
+   - `lambda:GetLayerVersion` must target versioned ARN `layer:nyiso-*:*`
+   - `lambda:InvokeFunction` needed for smoke testing
+   - `ec2:DescribeNetworkInterfaces` needed on `nyiso-lambda-role` (execution role, not deploy user)
+   - ECS service-linked role `AWSServiceRoleForECS` must exist before `create-cluster` with capacity providers
+
+### Data Backfill
+
+`scripts/backfill_2026.py` — one-time script that fetched Jan 1 – May 17, 2026 for all 4 datasets and inserted into Supabase. Reuses `_fetch_zip`, `_clean_*`, and `_bulk_insert` from `lambda/ingest.py` directly (no code duplication).
+
+Results: 40,219 load_actual rows, 49,665 lmp_dayahead rows, 49,305 lmp_realtime rows, 185,066 fuel_mix rows (fuel_mix was already populated by Lambda).
 
 ## Conventions
 
@@ -181,29 +272,76 @@ Streamlit on AWS ECS Fargate
 - DuckDB for local/notebook parquet queries; Postgres for cloud/dashboard
 - Parquet files are gitignored; `src/nyiso_client.py` regenerates locally
 - Notebooks use Plotly for interactive charts (nbviewer for rendering)
-- Lambda secrets (DB connection string) stored in AWS Secrets Manager
+- Lambda secrets stored in Lambda env vars (DATABASE_URL, CF_API_TOKEN, CF_ZONE_ID)
 - Docker image tagged with git SHA for traceability
+- Lambda layer uploaded to S3 first (>50MB), then published via `--content S3Bucket=...`
+- `zip` not available on Windows Git Bash — use Python `zipfile` module to build zips
+
+## Deploying Lambda Updates
+
+```bash
+# 1. Rebuild function zip (Python, from repo root)
+conda activate nyiso
+python -c "
+import zipfile
+from pathlib import Path
+z = zipfile.ZipFile('nyiso-function.zip', 'w', zipfile.ZIP_DEFLATED, compresslevel=6)
+for f in ['lambda/handler.py','lambda/ingest.py','lambda/features.py','lambda/inference.py','lambda/bess_dispatch.py']:
+    z.write(f, Path(f).name)
+for f in Path('models').rglob('*'):
+    z.write(f, str(f))
+z.close()
+"
+
+# 2. Push code update
+aws lambda update-function-code \
+  --function-name nyiso-ingestor \
+  --zip-file fileb://nyiso-function.zip \
+  --region us-east-1
+
+aws lambda wait function-updated --function-name nyiso-ingestor --region us-east-1
+
+# 3. Update env vars if needed
+aws lambda update-function-configuration \
+  --function-name nyiso-ingestor \
+  --environment "Variables={DATABASE_URL=...,MODEL_VERSION=...,CF_API_TOKEN=...,CF_ZONE_ID=...,CF_RECORD_NAME=nyiso.rahishah.com}" \
+  --region us-east-1
+```
+
+## Getting Current Dashboard IP
+
+```python
+import boto3
+ecs = boto3.client("ecs", region_name="us-east-1")
+ec2 = boto3.client("ec2", region_name="us-east-1")
+tasks = ecs.list_tasks(cluster="nyiso-dashboard", serviceName="nyiso-dashboard")["taskArns"]
+detail = ecs.describe_tasks(cluster="nyiso-dashboard", tasks=tasks)["tasks"][0]
+eni_id = next(d["value"] for att in detail["attachments"] for d in att["details"] if d["name"] == "networkInterfaceId")
+ip = ec2.describe_network_interfaces(NetworkInterfaceIds=[eni_id])["NetworkInterfaces"][0]["Association"]["PublicIp"]
+print(f"http://{ip}:8501")
+```
 
 ## TODO
 
-### Project 04 — Live Dashboard (current)
-- [x] Design Supabase Postgres schema from existing parquet structure (`sql/schema.sql`)
-- [x] Write migration script: load processed parquets → Postgres tables (`src/migrate_to_postgres.py`)
-- [x] Refactor `nyiso_client.py` into AWS Lambda handler (`lambda/handler.py`, `lambda/ingest.py`)
-- [x] Package trained XGBoost models as Lambda artifact (`scripts/export_models.py` → `models/*.joblib`)
-- [x] Build feature computation logic for Lambda (`lambda/features.py`)
-- [x] Build BESS dispatch recommendation logic for daily DA prices (`lambda/bess_dispatch.py`)
+### Project 04 — Live Dashboard
+- [x] Design Supabase Postgres schema (`sql/schema.sql`)
+- [x] Write migration script: parquets → Postgres (`src/migrate_to_postgres.py`)
+- [x] Lambda backend: handler, ingest, features, inference, bess_dispatch
+- [x] Package XGBoost models as Lambda artifact (`scripts/export_models.py`)
 - [x] Dockerize Streamlit app (`Dockerfile`)
-- [x] Build dashboard components (load vs forecast, LMP heatmap, spread tracker, BESS dispatch) in `app/app.py`
-- [ ] **Run `scripts/export_models.py` to generate .joblib model artifacts**
-- [ ] **Run `src/migrate_to_postgres.py` to populate Supabase (needs DATABASE_URL)**
-- [ ] Set up EventBridge cron rules (5min load/fuel, 1hr LMP) in AWS Console / CDK
-- [ ] Deploy Lambda to AWS (zip lambda/ + models/ → upload)
-- [ ] Deploy to ECS Fargate with public URL
+- [x] Build dashboard (load vs forecast, LMP heatmap, spread tracker, BESS dispatch) in `app/app.py`
+- [x] Deploy Lambda + EventBridge cron rules (`scripts/deploy_lambda_zip.sh`)
+- [x] Deploy ECS Fargate cluster + service + security group (`scripts/setup_ecs.sh`)
+- [x] CI/CD via GitHub Actions (`.github/workflows/deploy.yml`)
+- [x] Backfill 2026 data (`scripts/backfill_2026.py`)
+- [x] Stable HTTPS URL at `nyiso.rahishah.com` via Cloudflare + Lambda DNS auto-update
+- [ ] Fix `use_container_width` Streamlit deprecation warnings in `app/app.py` (removed after 2025-12-31)
+- [ ] Tighten Postgres query window back to 90 days once Lambda has 3 months of live data
+- [ ] Retrain models on 2025+2026 data and redeploy Lambda
 
 ### Forecasting Improvements
-- [ ] Add natural gas futures prices to LMP features
 - [ ] Add solar generation feature for duck curve
+- [ ] Retrain LMP model with 2026 data (covariate shift from 2024 training)
 
 ### Other
 - [ ] Fix Plotly rendering in GitHub notebook viewer
