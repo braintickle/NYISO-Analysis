@@ -136,3 +136,24 @@ CREATE TABLE IF NOT EXISTS bess_dispatch (
 CREATE INDEX IF NOT EXISTS idx_bess_dispatch_ts      ON bess_dispatch (timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_bess_dispatch_run     ON bess_dispatch (run_date DESC);
 CREATE INDEX IF NOT EXISTS idx_bess_dispatch_zone    ON bess_dispatch (zone, timestamp DESC);
+
+
+-- ── 9. bess_revenue_summary ───────────────────────────────────────────────────
+-- Pre-computed daily BESS revenue for the three strategies. Populated by Lambda
+-- compute_revenue_summary task (daily at 10am ET). Dashboard reads directly —
+-- no LP computation at page load.
+--   perfect_foresight_revenue: LP optimizer on actual DA LMP (upper bound)
+--   lp_revenue:                LP optimizer on XGBoost forecast prices, dispatch
+--                              evaluated at actual DA prices (NULL until Lambda
+--                              has run long enough to populate lmp_forecast)
+--   naive_revenue:             Fixed schedule (charge 0-5am, discharge 2-6pm)
+CREATE TABLE IF NOT EXISTS bess_revenue_summary (
+    date                      DATE PRIMARY KEY,
+    perfect_foresight_revenue DOUBLE PRECISION NOT NULL,
+    naive_revenue             DOUBLE PRECISION NOT NULL,
+    lp_revenue                DOUBLE PRECISION,           -- NULL if no forecast data
+    created_at                TIMESTAMPTZ DEFAULT NOW(),
+    updated_at                TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_bess_rev_date ON bess_revenue_summary (date DESC);

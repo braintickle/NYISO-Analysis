@@ -114,6 +114,28 @@ def optimize_dispatch(lmp_hourly: pd.Series) -> pd.DataFrame:
     return df
 
 
+def naive_daily_revenue(lmp_hourly: pd.Series) -> float:
+    """
+    Naive dispatch: charge midnight–6 AM, discharge 2–6 PM.
+    Uses the same battery constants as optimize_dispatch.
+    Returns total revenue for the day in USD.
+    """
+    prices = lmp_hourly.values.astype(float)
+    SOC = SOC_INIT_MWH
+    rev = 0.0
+    for h in range(min(24, len(prices))):
+        p = prices[h]
+        if h < 6:
+            c = max(0.0, min(MAX_POWER_MW, (SOC_MAX_MWH - SOC) / EFF_CHARGE))
+            SOC = min(SOC_MAX_MWH, SOC + c * EFF_CHARGE)
+            rev -= c * p
+        elif 14 <= h < 18:
+            d = max(0.0, min(MAX_POWER_MW, (SOC - SOC_MIN_MWH) * EFF_DISCHARGE))
+            SOC = max(SOC_MIN_MWH, SOC - d / EFF_DISCHARGE)
+            rev += d * p
+    return float(rev)
+
+
 def _zero_dispatch(lmp_hourly: pd.Series) -> pd.DataFrame:
     T = len(lmp_hourly)
     prices = lmp_hourly.values.astype(float)

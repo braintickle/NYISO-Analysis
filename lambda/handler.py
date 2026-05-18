@@ -204,6 +204,131 @@ def run_bess_dispatch(event: dict, context=None) -> dict:
             conn.close()
 
 
+# ── Handler: daily BESS revenue summary (10am ET, after DA clears) ───────────
+
+def compute_revenue_summary(event: dict, context=None) -> dict:
+    """
+    For each day not yet in bess_revenue_summary (or within the last 7 days to
+    pick up retroactive DA LMP corrections), compute:
+
+      perfect_foresight_revenue: LP on actual DA LMP prices (upper bound)
+      naive_revenue:             Fixed schedule (charge 0-5am, discharge 2-6pm)
+      lp_revenue:                LP on XGBoost forecast prices, dispatch evaluated
+                                 at actual DA prices (NULL when no forecast data)
+
+    Self-creates the table if missing. Idempotent — safe to run multiple times.
+    """
+    import pandas as pd
+    from datetime import date, timedelta
+    from bess_dispatch import optimize_dispatch, naive_daily_revenue
+
+    logger.info("=== compute_revenue_summary START ===")
+    conn = None
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+
+        # Self-create table (harmless if already exists)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS bess_revenue_summary (
+                date                      DATE PRIMARY KEY,
+                perfect_foresight_revenue DOUBLE PRECISION NOT NULL,
+                naive_revenue             DOUBLE PRECISION NOT NULL,
+                lp_revenue                DOUBLE PRECISION,
+                created_at                TIMESTAMPTZ DEFAULT NOW(),
+                updated_at                TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        conn.commit()
+
+        # Only (re)compute dates not yet stored, plus last 7 days for corrections
+        cur.execute("SELECT COALESCE(MAX(date), '1970-01-01'::date) FROM bess_revenue_summary")
+        last_stored = cur.fetchone()[0]
+        one_year_ago = date.today() - timedelta(days=365)
+        compute_from = max(one_year_ago, last_stored - timedelta(days=7))
+        logger.info(f"  Computing from {compute_from} (last stored: {last_stored})")
+
+        # Actual DA LMP for all target days
+        df_da = pd.read_sql("""
+            SELECT (timestamp AT TIME ZONE 'US/Eastern')::date AS day, lmp_total
+            FROM lmp_dayahead
+            WHERE zone = 'N.Y.C.'
+              AND (timestamp AT TIME ZONE 'US/Eastern')::date >= %(from_d)s
+              AND timestamp < NOW()
+            ORDER BY day, timestamp
+        """, conn, params={"from_d": compute_from})
+
+        # Forecast data — only rows where actuals have been backfilled
+        df_fcst = pd.read_sql("""
+            SELECT (timestamp AT TIME ZONE 'US/Eastern')::date AS day,
+                   EXTRACT(HOUR FROM timestamp AT TIME ZONE 'US/Eastern')::int AS hour,
+                   lmp_forecast, lmp_actual
+            FROM lmp_forecast
+            WHERE zone = 'N.Y.C.'
+              AND (timestamp AT TIME ZONE 'US/Eastern')::date >= %(from_d)s
+              AND lmp_actual IS NOT NULL
+              AND timestamp < NOW()
+            ORDER BY day, hour
+        """, conn, params={"from_d": compute_from})
+
+        fcst_by_day = {d: g for d, g in df_fcst.groupby("day")} if not df_fcst.empty else {}
+
+        rows_written = 0
+        for day, grp in df_da.groupby("day"):
+            prices = grp["lmp_total"].tolist()
+            if len(prices) < 20:
+                continue
+
+            # Perfect foresight: LP on actual DA prices
+            pf_res = optimize_dispatch(pd.Series(prices, dtype=float))
+            pf_rev = round(float(pf_res["revenue_usd"].sum()), 2)
+
+            # Naive: fixed schedule
+            naive_rev = round(naive_daily_revenue(pd.Series(prices, dtype=float)), 2)
+
+            # Our optimizer: LP on forecast, evaluated at actual DA prices
+            lp_rev = None
+            if day in fcst_by_day:
+                fg = fcst_by_day[day].sort_values("hour")
+                if len(fg) >= 20:
+                    lp_res = optimize_dispatch(pd.Series(fg["lmp_forecast"].tolist(), dtype=float))
+                    actual_px = fg["lmp_actual"].tolist()
+                    day_lp = 0.0
+                    for _, row in lp_res.iterrows():
+                        h = int(row["hour"])
+                        if h < len(actual_px) and actual_px[h] is not None:
+                            p = float(actual_px[h])
+                            day_lp += float(row["discharge_mw"]) * p - float(row["charge_mw"]) * p
+                    lp_rev = round(day_lp, 2)
+
+            cur.execute("""
+                INSERT INTO bess_revenue_summary
+                    (date, perfect_foresight_revenue, naive_revenue, lp_revenue, updated_at)
+                VALUES (%s, %s, %s, %s, NOW())
+                ON CONFLICT (date) DO UPDATE SET
+                    perfect_foresight_revenue = EXCLUDED.perfect_foresight_revenue,
+                    naive_revenue             = EXCLUDED.naive_revenue,
+                    lp_revenue                = EXCLUDED.lp_revenue,
+                    updated_at                = NOW()
+            """, (day, pf_rev, naive_rev, lp_rev))
+            rows_written += 1
+
+        conn.commit()
+        logger.info(f"=== compute_revenue_summary DONE: {rows_written} rows written ===")
+        return _ok({"days_written": rows_written, "computed_from": str(compute_from)})
+
+    except Exception as exc:
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        return _err("compute_revenue_summary failed", exc)
+    finally:
+        if conn:
+            conn.close()
+
+
 # ── Handler: Cloudflare DNS update (ECS Task State Change) ───────────────────
 
 def update_dns(event: dict, context=None) -> dict:
@@ -294,10 +419,11 @@ def lambda_handler(event: dict, context=None) -> dict:
     logger.info(f"lambda_handler dispatching task='{task}'")
 
     dispatch = {
-        "ingest_load_fuel": ingest_load_fuel,
-        "ingest_lmp":       ingest_lmp,
-        "bess_dispatch":    run_bess_dispatch,
-        "update_dns":       update_dns,
+        "ingest_load_fuel":        ingest_load_fuel,
+        "ingest_lmp":              ingest_lmp,
+        "bess_dispatch":           run_bess_dispatch,
+        "compute_revenue_summary": compute_revenue_summary,
+        "update_dns":              update_dns,
     }
 
     if task not in dispatch:

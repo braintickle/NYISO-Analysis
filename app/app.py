@@ -167,62 +167,23 @@ def load_bess_prices():
         return pd.Series(dtype=float), f"error: {exc}"
 
 
-# ── Revenue comparison helpers (1-hour cache) ─────────────────────────────────
-
-def _naive_daily_revenue(prices) -> float:
-    """Charge hours 0–5, discharge hours 14–17. Analytical SOC tracking."""
-    EFF = 0.85 ** 0.5
-    SOC = 200.0
-    rev = 0.0
-    for h in range(min(24, len(prices))):
-        p = float(prices[h])
-        if h < 6:
-            c = max(0.0, min(100.0, (380.0 - SOC) / EFF))
-            SOC = min(380.0, SOC + c * EFF)
-            rev -= c * p
-        elif 14 <= h < 18:
-            d = max(0.0, min(100.0, (SOC - 20.0) * EFF))
-            SOC = max(20.0, SOC - d / EFF)
-            rev += d * p
-    return rev
-
+# ── BESS revenue summary (read from Postgres, cached 1 hour) ─────────────────
 
 @st.cache_data(ttl=3600)
-def compute_revenue_table():
-    """LP Optimizer vs Naive over last 365 days of actual DA LMP. Cached 1 hour."""
-    if not DATABASE_URL or not _BESS_OK:
-        return None
+def load_revenue_summary() -> pd.DataFrame:
+    """Query pre-computed bess_revenue_summary. Lambda populates this daily."""
+    if not DATABASE_URL:
+        return pd.DataFrame()
     try:
         conn = _pg()
-        df = pd.read_sql("""
-            SELECT (timestamp AT TIME ZONE 'US/Eastern')::date AS day, lmp_total
-            FROM lmp_dayahead
-            WHERE zone = 'N.Y.C.' AND timestamp >= NOW() - INTERVAL '365 days'
-            ORDER BY day, timestamp
-        """, conn)
+        df = pd.read_sql(
+            "SELECT date, perfect_foresight_revenue, naive_revenue, lp_revenue "
+            "FROM bess_revenue_summary ORDER BY date",
+            conn)
         conn.close()
-
-        if df.empty:
-            return None
-
-        lp_rev = naive_rev = 0.0
-        days = 0
-        for day, grp in df.groupby("day"):
-            prices = grp["lmp_total"].tolist()
-            if len(prices) < 20:
-                continue
-            res = optimize_dispatch(pd.Series(prices, dtype=float))
-            lp_rev    += float(res["revenue_usd"].sum())
-            naive_rev += _naive_daily_revenue(prices)
-            days += 1
-
-        return {
-            "lp_total":  lp_rev,  "lp_daily":  lp_rev  / days if days else 0,
-            "naive_total": naive_rev, "naive_daily": naive_rev / days if days else 0,
-            "days": days,
-        }
-    except Exception as e:
-        return {"error": str(e)}
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 
 # ── Load everything ───────────────────────────────────────────────────────────
@@ -544,57 +505,76 @@ else:
 # Annual Revenue Comparison Table
 st.subheader("Annual Revenue Comparison")
 
-# Notebook backtest reference values (from notebooks/03_bess_optimization.ipynb)
 _NB_LP    = 9_062_076
 _NB_NAIVE = 5_572_918
 _NB_DAYS  = 365
 
-with st.spinner("Running LP optimization across 365 days of DA LMP (cached 1 hour)…"):
-    rev = compute_revenue_table()
+rev_df = load_revenue_summary()
 
-if rev and "error" not in rev and rev.get("days", 0) > 0:
-    n = rev["days"]
-    pct_lp_vs_naive  = (rev["lp_total"] / rev["naive_total"] - 1) * 100 \
-                       if rev["naive_total"] > 0 else 0
-    pct_nb_vs_naive  = (_NB_LP / _NB_NAIVE - 1) * 100
-    pct_naive_vs_lp  = (rev["naive_total"] / rev["lp_total"] - 1) * 100 \
-                       if rev["lp_total"] > 0 else 0
-    pct_nb_naive_ref = (_NB_NAIVE / _NB_LP - 1) * 100
+if rev_df.empty:
+    st.info(
+        "Revenue data updating — Lambda computes this daily at 10am ET after DA prices clear. "
+        "First run populates the full year."
+    )
+else:
+    n_days   = len(rev_df)
+    latest   = pd.to_datetime(rev_df["date"]).max()
+    pf_total = float(rev_df["perfect_foresight_revenue"].sum())
+    nv_total = float(rev_df["naive_revenue"].sum())
+    pf_daily = pf_total / n_days
+    nv_daily = nv_total / n_days
+
+    # Our Optimizer column — only shown if lmp_forecast data has been populated
+    lp_rows  = rev_df.dropna(subset=["lp_revenue"])
+    has_lp   = not lp_rows.empty
+
+    if has_lp:
+        lp_total = float(lp_rows["lp_revenue"].sum())
+        lp_n     = len(lp_rows)
+        lp_daily = lp_total / lp_n
+        nv_same  = float(rev_df.loc[rev_df["lp_revenue"].notna(), "naive_revenue"].sum())
+        pf_same  = float(rev_df.loc[rev_df["lp_revenue"].notna(), "perfect_foresight_revenue"].sum())
+        our_col  = [
+            f"${lp_total:,.0f}  ({lp_n}d)",
+            f"${lp_daily:,.0f}",
+            f"+{(lp_total/nv_same - 1)*100:.1f}%" if nv_same > 0 else "—",
+            f"{(lp_total/pf_same - 1)*100:+.1f}%" if pf_same > 0 else "—",
+        ]
+    else:
+        our_col = ["Populating…", "—", "—", "—"]
 
     table = pd.DataFrame(
         {
-            "LP Optimizer (live)": [
-                f"${rev['lp_total']:,.0f}",
-                f"${rev['lp_daily']:,.0f}",
-                f"+{pct_lp_vs_naive:.1f}%",
+            "Our Optimizer":          our_col,
+            "Perfect Foresight (LP)": [
+                f"${pf_total:,.0f}  ({n_days}d)",
+                f"${pf_daily:,.0f}",
+                f"+{(pf_total/nv_total - 1)*100:.1f}%" if nv_total > 0 else "—",
                 "—",
             ],
-            "Naive Strategy (live)": [
-                f"${rev['naive_total']:,.0f}",
-                f"${rev['naive_daily']:,.0f}",
+            "Naive Strategy": [
+                f"${nv_total:,.0f}  ({n_days}d)",
+                f"${nv_daily:,.0f}",
                 "—",
-                f"{pct_naive_vs_lp:.1f}%",
+                f"{(nv_total/pf_total - 1)*100:.1f}%" if pf_total > 0 else "—",
             ],
-            "2025 Backtest (Notebook)": [
-                f"${_NB_LP:,.0f}",
+            "2025 Backtest": [
+                f"${_NB_LP:,.0f}  ({_NB_DAYS}d)",
                 f"${_NB_LP // _NB_DAYS:,.0f}",
-                f"+{pct_nb_vs_naive:.1f}%",
+                f"+{(_NB_LP/_NB_NAIVE - 1)*100:.1f}%",
                 "reference",
             ],
         },
-        index=["Total Revenue", "Avg Daily Revenue", "vs Naive", "vs LP Optimizer"],
+        index=["Total Revenue", "Avg Daily Revenue", "vs Naive", "vs Perfect Foresight"],
     )
     st.dataframe(table, use_container_width=True)
     st.caption(
-        f"Live data: {n} days of N.Y.C. DA LMP. "
-        "Naive: charge midnight–6 AM, discharge 2–6 PM. "
-        "LP: PuLP/CBC optimizer. BESS: 100 MW / 400 MWh / 85% RTE. "
-        "Notebook backtest includes ICAP revenue."
+        f"Last updated {latest.strftime('%Y-%m-%d')} · Lambda runs daily at 10am ET · "
+        "Our Optimizer: LP on XGBoost forecast, evaluated at actual DA prices · "
+        "Perfect Foresight: LP on actual DA prices · "
+        "Naive: charge 0–6am, discharge 2–6pm · "
+        "2025 Backtest includes ICAP revenue"
     )
-elif rev and "error" in rev:
-    st.warning(f"Revenue computation failed: {rev['error']}")
-else:
-    st.info("Revenue comparison requires a Postgres connection and PuLP.")
 
 st.markdown("---")
 
