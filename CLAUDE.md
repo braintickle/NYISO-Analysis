@@ -1,5 +1,9 @@
 # CLAUDE.md — NYISO Energy Market Analysis
 
+# Working style: Always explain code after writing it. Walk through the logic, 
+# design decisions, and tradeoffs. I need to understand everything in this 
+# codebase well enough to explain it in a technical interview.
+
 ## Project Overview
 
 NYISO power markets analysis portfolio demonstrating data engineering, ML forecasting, optimization, and visualization. Built to showcase energy data science skills for power markets analyst roles (e.g., Modo Energy).
@@ -14,16 +18,33 @@ nyiso-analysis/
 ├── src/
 │   ├── nyiso_client.py        # NYISO public CSV API fetcher, caching, retry
 │   ├── clean.py               # Cleaning, typing, outlier flagging
+│   ├── migrate_to_postgres.py # One-time migration: parquets → Supabase Postgres
 │   └── generate_synthetic.py  # Synthetic data for Streamlit Cloud deploy
+├── lambda/                    # AWS Lambda functions (Project 04)
+│   ├── handler.py             # Entry points: ingest_load_fuel, ingest_lmp, run_bess_dispatch
+│   ├── ingest.py              # NYISO fetch + clean + Postgres insert
+│   ├── features.py            # Feature engineering (lags, rolling, weather, calendar)
+│   ├── inference.py           # XGBoost model loading + prediction + forecast writer
+│   ├── bess_dispatch.py       # PuLP LP optimizer + Postgres writer
+│   └── requirements.txt       # Lambda-specific dependencies
+├── scripts/
+│   └── export_models.py       # Train XGBoost models + save .joblib artifacts to models/
+├── models/                    # Trained model artifacts (gitignored); run export_models.py
+│   ├── load_model_nyc.joblib
+│   ├── load_model_longil.joblib
+│   └── lmp_model_nyc.joblib
+├── sql/
+│   └── schema.sql             # Supabase Postgres DDL (8 tables)
 ├── notebooks/
 │   ├── 01_eda.ipynb           # EDA: load, LMP, fuel mix, DA/RT spread
 │   ├── 02_forecasting.ipynb   # Load + LMP forecasting (SARIMA, Prophet, XGBoost)
 │   └── 03_bess_optimization.ipynb  # BESS dispatch LP optimizer
 ├── app/
-│   └── app.py                 # Streamlit dashboard
+│   └── app.py                 # Streamlit dashboard (Postgres-first, parquet fallback)
 ├── data/
 │   ├── raw/                   # Cached monthly parquets (gitignored)
 │   └── processed/             # Clean analysis-ready parquets (gitignored)
+├── Dockerfile                 # Streamlit app for ECS Fargate
 ├── requirements.txt
 └── README.md
 ```
@@ -166,16 +187,19 @@ Streamlit on AWS ECS Fargate
 ## TODO
 
 ### Project 04 — Live Dashboard (current)
-- [ ] Design Supabase Postgres schema from existing parquet structure
-- [ ] Write migration script: load processed parquets → Postgres tables
-- [ ] Refactor `nyiso_client.py` into AWS Lambda handler
-- [ ] Package trained XGBoost models as Lambda layer / bundled artifact
-- [ ] Build feature computation logic for Lambda (lags, rolling stats from Postgres)
-- [ ] Set up EventBridge cron rules (5min load/fuel, 1hr LMP)
-- [ ] Build BESS dispatch recommendation logic for daily DA prices
-- [ ] Dockerize Streamlit app
+- [x] Design Supabase Postgres schema from existing parquet structure (`sql/schema.sql`)
+- [x] Write migration script: load processed parquets → Postgres tables (`src/migrate_to_postgres.py`)
+- [x] Refactor `nyiso_client.py` into AWS Lambda handler (`lambda/handler.py`, `lambda/ingest.py`)
+- [x] Package trained XGBoost models as Lambda artifact (`scripts/export_models.py` → `models/*.joblib`)
+- [x] Build feature computation logic for Lambda (`lambda/features.py`)
+- [x] Build BESS dispatch recommendation logic for daily DA prices (`lambda/bess_dispatch.py`)
+- [x] Dockerize Streamlit app (`Dockerfile`)
+- [x] Build dashboard components (load vs forecast, LMP heatmap, spread tracker, BESS dispatch) in `app/app.py`
+- [ ] **Run `scripts/export_models.py` to generate .joblib model artifacts**
+- [ ] **Run `src/migrate_to_postgres.py` to populate Supabase (needs DATABASE_URL)**
+- [ ] Set up EventBridge cron rules (5min load/fuel, 1hr LMP) in AWS Console / CDK
+- [ ] Deploy Lambda to AWS (zip lambda/ + models/ → upload)
 - [ ] Deploy to ECS Fargate with public URL
-- [ ] Build dashboard components (load vs forecast, LMP heatmap, spread tracker, BESS dispatch, YTD revenue)
 
 ### Forecasting Improvements
 - [ ] Add natural gas futures prices to LMP features

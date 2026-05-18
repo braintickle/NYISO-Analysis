@@ -1,0 +1,134 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ECR",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken",
+        "ecr:CreateRepository",
+        "ecr:DescribeRepositories",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:InitiateLayerUpload",
+        "ecr:UploadLayerPart",
+        "ecr:CompleteLayerUpload",
+        "ecr:PutImage",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:ListImages"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IAM",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:GetRole",
+        "iam:AttachRolePolicy",
+        "iam:PassRole",
+        "iam:ListAttachedRolePolicies"
+      ],
+      "Resource": "arn:aws:iam::358592704128:role/nyiso-*"
+    },
+    {
+      "Sid": "Lambda",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateFunction",
+        "lambda:UpdateFunctionCode",
+        "lambda:UpdateFunctionConfiguration",
+        "lambda:GetFunction",
+        "lambda:InvokeFunction",
+        "lambda:ListFunctions",
+        "lambda:AddPermission",
+        "lambda:GetPolicy",
+        "lambda:PublishLayerVersion",
+        "lambda:ListLayerVersions"
+      ],
+      "Resource": [
+        "arn:aws:lambda:us-east-1:358592704128:function:nyiso-*",
+        "arn:aws:lambda:us-east-1:358592704128:layer:nyiso-*"
+      ]
+    },
+    {
+      "Sid": "LambdaLayerPublish",
+      "Effect": "Allow",
+      "Action": ["lambda:PublishLayerVersion", "lambda:GetLayerVersion"],
+      "Resource": "arn:aws:lambda:us-east-1:358592704128:layer:nyiso-*:*"
+    },
+    {
+      "Sid": "EventBridge",
+      "Effect": "Allow",
+      "Action": [
+        "events:PutRule",
+        "events:PutTargets",
+        "events:DescribeRule",
+        "events:ListRules",
+        "events:ListTargetsByRule"
+      ],
+      "Resource": "arn:aws:events:us-east-1:358592704128:rule/nyiso-*"
+    },
+    {
+      "Sid": "ECS",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:CreateCluster",
+        "ecs:DescribeClusters",
+        "ecs:ListClusters",
+        "ecs:RegisterTaskDefinition",
+        "ecs:DescribeTaskDefinition",
+        "ecs:ListTaskDefinitions",
+        "ecs:CreateService",
+        "ecs:UpdateService",
+        "ecs:DescribeServices",
+        "ecs:ListServices",
+        "ecs:ListTasks",
+        "ecs:DescribeTasks"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EC2Networking",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateSecurityGroup",
+        "ec2:DescribeSecurityGroups",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeNetworkInterfaces"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "S3Artifacts",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:PutBucketVersioning",
+        "s3:GetBucketLocation",
+        "s3:ListBucket",
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::nyiso-artifacts-358592704128",
+        "arn:aws:s3:::nyiso-artifacts-358592704128/*"
+      ]
+    },
+    {
+      "Sid": "CloudWatchLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:DescribeLogGroups",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:us-east-1:358592704128:*"
+    }
+  ]
+}

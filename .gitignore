@@ -6,6 +6,21 @@ __pycache__/
 data/raw/
 data/processed/
 
+# Trained model artifacts (regenerate with scripts/export_models.py)
+models/*.joblib
+models/*.ubj
+
+# MLflow experiment tracking
+mlruns/
+
+# Lambda build artifacts
+lambda_layer/
+nyiso-deps-layer.zip
+nyiso-function.zip
+
+# Claude internal
+.claude/
+
 # OS
 .DS_Store
 

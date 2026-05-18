@@ -1,0 +1,90 @@
+name: Deploy NYISO Dashboard to ECS Fargate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "src/**"
+      - "requirements.txt"
+      - "Dockerfile"
+      - ".github/workflows/deploy.yml"
+
+env:
+  AWS_REGION:    us-east-1
+  ECR_REPO:      nyiso-streamlit
+  ECS_CLUSTER:   nyiso-dashboard
+  ECS_SERVICE:   nyiso-dashboard
+  TASK_FAMILY:   nyiso-dashboard
+  CONTAINER:     nyiso-streamlit
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image
+        id: build
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG:     ${{ github.sha }}
+        run: |
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}"
+          docker build --platform linux/amd64 -t "${IMAGE_URI}" -t "${ECR_REGISTRY}/${ECR_REPO}:latest" .
+          docker push "${IMAGE_URI}"
+          docker push "${ECR_REGISTRY}/${ECR_REPO}:latest"
+          echo "image=${IMAGE_URI}" >> $GITHUB_OUTPUT
+
+      - name: Render ECS task definition with new image
+        id: render-task
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition-family: ${{ env.TASK_FAMILY }}
+          container-name:         ${{ env.CONTAINER }}
+          image:                  ${{ steps.build.outputs.image }}
+          environment-variables: |
+            DATABASE_URL=${{ secrets.DATABASE_URL }}
+
+      - name: Deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-task.outputs.task-definition }}
+          service:         ${{ env.ECS_SERVICE }}
+          cluster:         ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      - name: Get public IP
+        run: |
+          sleep 10
+          TASK_ARN=$(aws ecs list-tasks \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service-name ${{ env.ECS_SERVICE }} \
+            --query 'taskArns[0]' --output text)
+          IP=$(aws ecs describe-tasks \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --tasks "${TASK_ARN}" \
+            --query "tasks[0].attachments[0].details[?name=='networkInterfaceId'].value" \
+            --output text | xargs -I {} aws ec2 describe-network-interfaces \
+            --network-interface-ids {} \
+            --query 'NetworkInterfaces[0].Association.PublicIp' --output text)
+          echo "Dashboard live at: http://${IP}:8501"
+          echo "PUBLIC_IP=${IP}" >> $GITHUB_STEP_SUMMARY
+          echo "## Deployed!" >> $GITHUB_STEP_SUMMARY
+          echo "Dashboard: http://${IP}:8501" >> $GITHUB_STEP_SUMMARY

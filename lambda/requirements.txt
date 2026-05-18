@@ -1,0 +1,20 @@
+# Lambda dependencies
+# Heavy packages (pandas, numpy, xgboost, scipy) should go in a Lambda Layer
+# to keep the deployment package under the 50MB zip limit.
+#
+# To create a layer:
+#   pip install pandas numpy xgboost scikit-learn -t python/
+#   zip -r layer.zip python/
+#   aws lambda publish-layer-version --layer-name nyiso-ml --zip-file fileb://layer.zip
+
+psycopg2-binary==2.9.9
+requests==2.31.0
+pandas==2.2.2
+numpy==1.26.4
+xgboost==2.0.3
+scikit-learn==1.4.2
+joblib==1.4.2
+holidays==0.46
+pulp==2.8.0
+python-dotenv==1.0.1
+openmeteo-requests==1.2.0
