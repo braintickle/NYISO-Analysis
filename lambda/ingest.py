@@ -102,7 +102,7 @@ def _clean_load(frames: list[pd.DataFrame]) -> pd.DataFrame:
 
     zone_col  = next((c for c in df.columns if "name" in c.lower() or "zone" in c.lower()), None)
     ptid_col  = next((c for c in df.columns if "ptid" in c.lower()), None)
-    load_col  = next((c for c in df.columns if "load" in c.lower() and "mw" in c.lower()), None)
+    load_col  = next((c for c in df.columns if c.strip().lower() == "load" or ("load" in c.lower() and "mw" in c.lower())), None)
 
     out = pd.DataFrame({"timestamp": df["timestamp"]})
     out["zone"]       = df[zone_col].astype(str).str.strip() if zone_col else None
@@ -150,7 +150,7 @@ def _clean_lmp(frames: list[pd.DataFrame]) -> pd.DataFrame:
     ts_col    = next((c for c in df.columns if "time stamp" in c.lower() or "timestamp" in c.lower()), None)
     zone_col  = next((c for c in df.columns if "name" in c.lower() or "zone" in c.lower()), None)
     ptid_col  = next((c for c in df.columns if "ptid" in c.lower()), None)
-    lmp_col   = next((c for c in df.columns if c.strip().lower() == "lbmp"), None)
+    lmp_col   = next((c for c in df.columns if "lbmp" in c.strip().lower()), None)
     loss_col  = next((c for c in df.columns if "loss" in c.lower()), None)
     cong_col  = next((c for c in df.columns if "congestion" in c.lower()), None)
 
@@ -187,7 +187,23 @@ def _bulk_insert(conn, table: str, df: pd.DataFrame, conflict_cols: list[str]) -
         f"INSERT INTO {table} ({', '.join(cols)}) VALUES %s "
         f"ON CONFLICT ({', '.join(conflict_cols)}) DO NOTHING"
     )
-    rows = [tuple(r) for r in df.itertuples(index=False, name=None)]
+    import numpy as np
+    def _to_native(v):
+        if v is None or (isinstance(v, float) and v != v):
+            return None
+        try:
+            if pd.isna(v):
+                return None
+        except (TypeError, ValueError):
+            pass
+        if isinstance(v, np.integer):
+            return int(v)
+        if isinstance(v, np.floating):
+            return float(v)
+        if isinstance(v, np.bool_):
+            return bool(v)
+        return v
+    rows = [tuple(_to_native(v) for v in r) for r in df.itertuples(index=False, name=None)]
     inserted = 0
     with conn.cursor() as cur:
         for start in range(0, len(rows), BATCH_SIZE):
