@@ -205,6 +205,77 @@ def run_bess_dispatch(event: dict, context=None) -> dict:
             conn.close()
 
 
+# ── Handler: Cloudflare DNS update (ECS Task State Change) ───────────────────
+
+def update_dns(event: dict, context=None) -> dict:
+    """
+    Called by EventBridge on ECS Task State Change (lastStatus=RUNNING).
+    Extracts the new Fargate task's public IP from the event and updates
+    the Cloudflare A record so the domain always points at the live task.
+
+    Env vars required: CF_API_TOKEN, CF_ZONE_ID, CF_RECORD_NAME
+    """
+    import boto3
+    import requests as _requests
+
+    logger.info("=== update_dns START ===")
+    detail = event.get("detail", {})
+
+    # Extract ENI ID from ECS task event attachments
+    eni_id = None
+    for att in detail.get("attachments", []):
+        for d in att.get("details", []):
+            if d.get("name") == "networkInterfaceId":
+                eni_id = d["value"]
+                break
+        if eni_id:
+            break
+
+    if not eni_id:
+        return _err("No networkInterfaceId in ECS task event — cannot update DNS")
+
+    # Resolve ENI → public IP
+    ec2 = boto3.client("ec2", region_name="us-east-1")
+    eni = ec2.describe_network_interfaces(NetworkInterfaceIds=[eni_id])["NetworkInterfaces"][0]
+    public_ip = eni.get("Association", {}).get("PublicIp")
+
+    if not public_ip:
+        return _err(f"ENI {eni_id} has no public IP yet — task may still be provisioning")
+
+    # Cloudflare DNS update
+    token   = os.environ["CF_API_TOKEN"]
+    zone_id = os.environ["CF_ZONE_ID"]
+    name    = os.environ.get("CF_RECORD_NAME", "nyiso.rahishah.com")
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    # Look up record ID dynamically so no hardcoded IDs in code
+    r = _requests.get(
+        f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
+        headers=headers,
+        params={"name": name, "type": "A"},
+        timeout=10,
+    )
+    records = r.json().get("result", [])
+    if not records:
+        return _err(f"No A record found for {name} in Cloudflare zone {zone_id}")
+
+    record_id = records[0]["id"]
+    old_ip    = records[0]["content"]
+
+    r = _requests.patch(
+        f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}",
+        headers=headers,
+        json={"content": public_ip},
+        timeout=10,
+    )
+    resp = r.json()
+    if not resp.get("success"):
+        return _err(f"Cloudflare update failed: {resp.get('errors')}")
+
+    logger.info(f"DNS updated: {name}  {old_ip} → {public_ip}")
+    return _ok({"record": name, "old_ip": old_ip, "new_ip": public_ip})
+
+
 # ── Unified dispatcher (single Lambda with task routing) ──────────────────────
 
 def lambda_handler(event: dict, context=None) -> dict:
@@ -216,6 +287,10 @@ def lambda_handler(event: dict, context=None) -> dict:
       {"task": "ingest_lmp"}
       {"task": "bess_dispatch"}
     """
+    # ECS Task State Change events come directly from EventBridge (no 'task' key)
+    if event.get("detail-type") == "ECS Task State Change":
+        return update_dns(event, context)
+
     task = event.get("task", "ingest_lmp")
     logger.info(f"lambda_handler dispatching task='{task}'")
 
@@ -223,6 +298,7 @@ def lambda_handler(event: dict, context=None) -> dict:
         "ingest_load_fuel": ingest_load_fuel,
         "ingest_lmp":       ingest_lmp,
         "bess_dispatch":    run_bess_dispatch,
+        "update_dns":       update_dns,
     }
 
     if task not in dispatch:
