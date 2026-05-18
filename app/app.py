@@ -62,7 +62,7 @@ def _load_from_postgres() -> tuple:
     import psycopg2
     conn = psycopg2.connect(DATABASE_URL)
 
-    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=90)
+    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=548)
     cutoff_str = cutoff.isoformat()
 
     df_load = pd.read_sql("""
@@ -183,10 +183,11 @@ with st.sidebar:
         st.warning("Using synthetic data. Run the EDA notebook to generate real data.")
 
     all_zones = sorted(df_load['zone'].unique().tolist())
+    preferred = ["N.Y.C.", "LONGIL", "CAPITL"]
     selected_zones = st.multiselect(
         "Zones to display",
         options=all_zones,
-        default=["N.Y.C.", "LONGIL", "CAPITL"]
+        default=[z for z in preferred if z in all_zones] or all_zones[:3]
     )
 
     min_date = df_system['timestamp'].min().date()
