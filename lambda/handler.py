@@ -32,35 +32,24 @@ import os
 import sys
 from datetime import datetime, timezone
 
-import pandas as pd
 import psycopg2
 from dotenv import load_dotenv
 
 # Allow local imports when running outside Lambda (e.g., scripts/export_models.py)
 sys.path.insert(0, os.path.dirname(__file__))
 
-from ingest import ingest_load, ingest_fuel, ingest_lmp_dayahead, ingest_lmp_realtime
-from features import (
-    fetch_weather_forecast,
-    build_load_features,
-    build_lmp_features,
-)
-from inference import (
-    predict_load,
-    predict_lmp,
-    write_load_forecast,
-    write_lmp_forecast,
-    backfill_forecast_actuals,
-)
-from bess_dispatch import fetch_da_lmp_today, optimize_dispatch, write_dispatch
+# Heavy ML/ingest imports are intentionally NOT imported here.
+# They are lazy-loaded inside each handler so that update_dns cold-starts
+# don't pay the cost of importing xgboost, joblib, pulp, pandas, etc.
+# update_dns only needs boto3 + requests, both of which it imports inline.
 
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(funcName)s — %(message)s",
-    datefmt="%H:%M:%S",
-)
+# Lambda's runtime pre-configures the root logger before our code runs.
+# logging.basicConfig() is a no-op when handlers already exist, so the
+# level stays at WARNING and every logger.info() is silently dropped.
+# Directly setting the root logger level is the correct fix.
+logging.getLogger().setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
 MODEL_VERSION = os.environ.get("MODEL_VERSION")
@@ -90,6 +79,7 @@ def ingest_load_fuel(event: dict, context=None) -> dict:
     Fetch load_actual and fuel_mix for the current and previous month.
     Idempotent — new rows are inserted, existing rows are skipped.
     """
+    from ingest import ingest_load, ingest_fuel
     logger.info("=== ingest_load_fuel START ===")
     conn = None
     try:
@@ -114,6 +104,13 @@ def ingest_lmp(event: dict, context=None) -> dict:
     2. Run XGBoost load + LMP forecasts for the next 24 hours.
     3. Backfill forecast actuals for past hours.
     """
+    import pandas as pd
+    from ingest import ingest_lmp_dayahead, ingest_lmp_realtime
+    from features import fetch_weather_forecast, build_load_features, build_lmp_features
+    from inference import (
+        predict_load, predict_lmp,
+        write_load_forecast, write_lmp_forecast, backfill_forecast_actuals,
+    )
     logger.info("=== ingest_lmp START ===")
     conn = None
     try:
@@ -170,6 +167,8 @@ def run_bess_dispatch(event: dict, context=None) -> dict:
     """
     Fetch today's DA LMP for N.Y.C., run LP optimizer, write hourly dispatch plan.
     """
+    import pandas as pd
+    from bess_dispatch import fetch_da_lmp_today, optimize_dispatch, write_dispatch
     logger.info("=== run_bess_dispatch START ===")
     conn = None
     try:
