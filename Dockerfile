@@ -2,9 +2,9 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# System deps for psycopg2
+# System deps for psycopg2, nginx, curl
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq-dev gcc \
+    libpq-dev gcc nginx curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -13,11 +13,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ ./app/
 COPY src/  ./src/
 
-EXPOSE 8501
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY start.sh ./start.sh
+RUN chmod +x ./start.sh
 
-HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health || exit 1
+EXPOSE 80
 
-ENTRYPOINT ["streamlit", "run", "app/app.py", \
-    "--server.port=8501", \
-    "--server.address=0.0.0.0", \
-    "--server.headless=true"]
+HEALTHCHECK CMD curl --fail http://localhost:80/ || exit 1
+
+ENTRYPOINT ["./start.sh"]
