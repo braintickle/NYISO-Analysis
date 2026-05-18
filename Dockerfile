@@ -10,8 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app/ ./app/
-COPY src/  ./src/
+COPY app/    ./app/
+COPY src/    ./src/
+COPY lambda/ ./lambda/
 
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY start.sh ./start.sh
