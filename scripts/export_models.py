@@ -277,10 +277,13 @@ def main():
     logger.info("Training load models ...")
     load_models = train_load_models(df_load_feat)
 
-    joblib.dump(load_models["N.Y.C."], MODEL_DIR / "load_model_nyc.joblib")
-    logger.info(f"  Saved: {MODEL_DIR / 'load_model_nyc.joblib'}")
-    joblib.dump(load_models["LONGIL"], MODEL_DIR / "load_model_longil.joblib")
-    logger.info(f"  Saved: {MODEL_DIR / 'load_model_longil.joblib'}")
+    # Save as native XGBoost binary (.ubj) — version-stable across XGBoost major versions.
+    # joblib-serialized sklearn XGBRegressor breaks when local XGBoost version (3.2.x)
+    # differs from the Lambda layer version (3.0.x); .ubj avoids that entirely.
+    load_models["N.Y.C."].get_booster().save_model(str(MODEL_DIR / "load_model_nyc.ubj"))
+    logger.info(f"  Saved: {MODEL_DIR / 'load_model_nyc.ubj'}")
+    load_models["LONGIL"].get_booster().save_model(str(MODEL_DIR / "load_model_longil.ubj"))
+    logger.info(f"  Saved: {MODEL_DIR / 'load_model_longil.ubj'}")
 
     # ── LMP model ──────────────────────────────────────────────────────────────
     logger.info("Engineering LMP features ...")
@@ -289,8 +292,9 @@ def main():
     logger.info("Training LMP model ...")
     lmp_model = train_lmp_model(df_lmp_feat)
 
-    joblib.dump(lmp_model, MODEL_DIR / "lmp_model_nyc.joblib")
-    logger.info(f"  Saved: {MODEL_DIR / 'lmp_model_nyc.joblib'}")
+    # Overwrite the production .ubj used by Lambda inference (same filename as before).
+    lmp_model.get_booster().save_model(str(MODEL_DIR / "lmp_r1_production.ubj"))
+    logger.info(f"  Saved: {MODEL_DIR / 'lmp_r1_production.ubj'}")
 
     logger.info("=== export_models.py complete ===")
     logger.info(f"  Artifacts in: {MODEL_DIR}")

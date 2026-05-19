@@ -197,7 +197,7 @@ bess_prices, bess_source = load_bess_prices()
 now_et       = pd.Timestamp.now(tz="US/Eastern")
 today_et     = now_et.date()
 yesterday_et = (now_et - pd.Timedelta(days=1)).date()
-yesterday_str = (now_et - pd.Timedelta(days=1)).strftime("%d/%m/%y")
+yesterday_str = (now_et - pd.Timedelta(days=1)).strftime("%m/%d/%y")
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -450,7 +450,7 @@ st.markdown("""
 """)
 
 # Today's Dispatch
-st.subheader(f"Today's Optimal Dispatch — {now_et.strftime('%d/%m/%y')}")
+st.subheader(f"Today's Optimal Dispatch — {now_et.strftime('%m/%d/%y')}")
 
 if not _BESS_OK:
     st.warning("BESS optimizer (PuLP) not importable in this environment.")
@@ -504,9 +504,10 @@ else:
 # Annual Revenue Comparison Table
 st.subheader("Annual Revenue Comparison")
 
-_NB_LP    = 9_062_076
-_NB_NAIVE = 5_572_918
-_NB_DAYS  = 365
+# ICAP rate: 2025 NYC Zone J strip auction prices, same for all three strategies.
+# ICAP is paid for capacity availability, not dispatch schedule.
+# From 2025 backtest: LP+ICAP=$14,614,618 minus energy-only LP=$9,062,076 → $5,552,542/yr.
+ICAP_DAILY_USD = 5_552_542 / 365  # $/day, applied equally to all strategies
 
 rev_df = load_revenue_summary()
 
@@ -516,43 +517,74 @@ if rev_df.empty:
         "First run populates the full year."
     )
 else:
-    n_days   = len(rev_df)
-    pf_total = float(rev_df["perfect_foresight_revenue"].sum())
-    nv_total = float(rev_df["naive_revenue"].sum())
-    pf_daily = pf_total / n_days
-    nv_daily = nv_total / n_days
-    date_min = pd.to_datetime(rev_df["date"]).min().strftime("%Y-%m-%d")
-    date_max = pd.to_datetime(rev_df["date"]).max().strftime("%Y-%m-%d")
+    # Use the intersection of dates where all three strategies are available.
+    common_df = rev_df.dropna(subset=["lp_revenue"])
+    use_df    = common_df if not common_df.empty else rev_df
+
+    n_days   = len(use_df)
+    date_min = pd.to_datetime(use_df["date"]).min().strftime("%Y-%m-%d")
+    date_max = pd.to_datetime(use_df["date"]).max().strftime("%Y-%m-%d")
+
+    # Energy arbitrage from live data
+    pf_energy = float(use_df["perfect_foresight_revenue"].sum())
+    nv_energy = float(use_df["naive_revenue"].sum())
+    lp_energy = float(use_df["lp_revenue"].sum()) if not common_df.empty else None
+
+    # ICAP revenue — same daily rate applied equally to all strategies
+    icap_total = ICAP_DAILY_USD * n_days
+
+    pf_total = pf_energy + icap_total
+    nv_total = nv_energy + icap_total
+    lp_total = (lp_energy + icap_total) if lp_energy is not None else None
+
+    def _fmt_rev(v):  return f"${v:,.0f}" if v is not None else "—"
+    def _fmt_vs(a, b): return f"+{(a/b - 1)*100:.1f}%" if (a and b and b > 0) else "—"
+    def _fmt_diff(a, b): return f"{(a/b - 1)*100:.1f}%" if (a and b and b > 0) else "—"
 
     table = pd.DataFrame(
         {
-            "Perfect Foresight (LP)": [
-                f"${pf_total:,.0f}",
-                f"${pf_daily:,.0f}",
-                f"+{(pf_total/nv_total - 1)*100:.1f}%" if nv_total > 0 else "—",
+            "Perfect Foresight": [
+                _fmt_rev(pf_energy),
+                _fmt_rev(icap_total),
+                _fmt_rev(pf_total),
+                _fmt_rev(pf_total / n_days if n_days else None),
+                _fmt_vs(pf_total, nv_total),
                 "—",
             ],
             "Naive Strategy": [
-                f"${nv_total:,.0f}",
-                f"${nv_daily:,.0f}",
+                _fmt_rev(nv_energy),
+                _fmt_rev(icap_total),
+                _fmt_rev(nv_total),
+                _fmt_rev(nv_total / n_days if n_days else None),
                 "—",
-                f"{(nv_total/pf_total - 1)*100:.1f}%" if pf_total > 0 else "—",
+                _fmt_diff(nv_total, pf_total),
             ],
             "BESS Optimizer": [
-                f"${_NB_LP:,.0f}",
-                f"${_NB_LP // _NB_DAYS:,.0f}",
-                f"+{(_NB_LP/_NB_NAIVE - 1)*100:.1f}%",
-                "reference",
+                _fmt_rev(lp_energy),
+                _fmt_rev(icap_total) if lp_energy is not None else "—",
+                _fmt_rev(lp_total),
+                _fmt_rev(lp_total / n_days if (lp_total and n_days) else None),
+                _fmt_vs(lp_total, nv_total),
+                _fmt_diff(lp_total, pf_total),
             ],
         },
-        index=["Total Revenue", "Avg Daily Revenue", "vs Naive", "vs Perfect Foresight"],
+        index=[
+            "Energy Arbitrage",
+            "ICAP Revenue",
+            "Total Revenue",
+            "Avg Daily Revenue",
+            "vs Naive",
+            "vs Perfect Foresight",
+        ],
     )
     st.dataframe(table, use_container_width=True)
+    lp_note = "" if not common_df.empty else " · BESS Optimizer pending forecast backfill"
     st.caption(
-        f"Live data: {date_min} — {date_max} ({n_days} days) · "
+        f"Date range: {date_min} — {date_max} ({n_days} days){lp_note} · "
         "Perfect Foresight: LP on actual DA prices · "
-        "Naive: charge 0–6 AM, discharge 2–6 PM · "
-        "BESS Optimizer: 2025 full-year backtest with ICAP revenue"
+        "Naive: fixed schedule (charge 0–6 AM, discharge 2–6 PM) · "
+        "BESS Optimizer: LP on XGBoost forecast prices · "
+        "ICAP: 2025 NYC Zone J strip auction at $15,212/day"
     )
 
 st.markdown("---")

@@ -71,6 +71,7 @@ jobs:
           wait-for-service-stability: true
 
       - name: Get public IP
+        id: get-ip
         run: |
           sleep 10
           TASK_ARN=$(aws ecs list-tasks \
@@ -85,6 +86,32 @@ jobs:
             --network-interface-ids {} \
             --query 'NetworkInterfaces[0].Association.PublicIp' --output text)
           echo "Dashboard live at: http://${IP}:8501"
+          echo "ip=${IP}" >> $GITHUB_OUTPUT
           echo "PUBLIC_IP=${IP}" >> $GITHUB_STEP_SUMMARY
           echo "## Deployed!" >> $GITHUB_STEP_SUMMARY
           echo "Dashboard: http://${IP}:8501" >> $GITHUB_STEP_SUMMARY
+
+      - name: Update Cloudflare DNS
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ZONE_ID:   ${{ secrets.CF_ZONE_ID }}
+          NEW_IP:       ${{ steps.get-ip.outputs.ip }}
+        run: |
+          # Look up the A record ID for nyiso.rahishah.com
+          RECORD=$(curl -s -X GET \
+            "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records?name=nyiso.rahishah.com&type=A" \
+            -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            -H "Content-Type: application/json")
+          RECORD_ID=$(echo "${RECORD}" | python3 -c "import sys,json; print(json.load(sys.stdin)['result'][0]['id'])")
+          OLD_IP=$(echo "${RECORD}" | python3 -c "import sys,json; print(json.load(sys.stdin)['result'][0]['content'])")
+
+          # Patch A record with new task IP
+          RESP=$(curl -s -X PATCH \
+            "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records/${RECORD_ID}" \
+            -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data "{\"content\": \"${NEW_IP}\"}")
+          SUCCESS=$(echo "${RESP}" | python3 -c "import sys,json; print(json.load(sys.stdin)['success'])")
+
+          echo "DNS updated: ${OLD_IP} → ${NEW_IP} (success=${SUCCESS})"
+          echo "DNS: nyiso.rahishah.com → ${NEW_IP}" >> $GITHUB_STEP_SUMMARY

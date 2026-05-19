@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 from typing import Optional
 
-import joblib
 import numpy as np
 import pandas as pd
 import psycopg2
@@ -28,30 +27,32 @@ MODEL_DIR = Path(os.environ.get("MODEL_DIR", str(Path(__file__).parent / "models
 
 # ── Model loading ──────────────────────────────────────────────────────────────
 
-def _load_model(name: str):
-    path = MODEL_DIR / name
-    if not path.exists():
-        raise FileNotFoundError(
-            f"Model not found: {path}. "
-            "Run scripts/export_models.py to generate model artifacts."
-        )
-    model = joblib.load(path)
-    logger.info(f"  Loaded model: {name}")
-    return model
-
-
 _load_models_cache: dict = {}
 
 
 def get_load_models() -> dict:
-    """Return {zone: model} dict for load forecasting (cached after first load)."""
-    import xgboost as xgb  # noqa — ensures xgboost is imported (with scipy mock already in place)
+    """Return {zone: xgb.Booster} dict for load forecasting (cached after first load).
+
+    Uses native XGBoost binary format (.ubj) — version-stable across XGBoost major
+    versions, unlike joblib-serialized sklearn XGBRegressors which break when the
+    local training version (3.2.x) differs from the Lambda layer version (3.0.x).
+    """
+    import xgboost as xgb
     global _load_models_cache
     if "load" not in _load_models_cache:
-        _load_models_cache["load"] = {
-            "N.Y.C.": _load_model("load_model_nyc.joblib"),
-            "LONGIL": _load_model("load_model_longil.joblib"),
-        }
+        boosters = {}
+        for zone, fname in [("N.Y.C.", "load_model_nyc.ubj"), ("LONGIL", "load_model_longil.ubj")]:
+            path = MODEL_DIR / fname
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"Model not found: {path}. "
+                    "Run scripts/export_models.py to generate model artifacts."
+                )
+            booster = xgb.Booster()
+            booster.load_model(str(path))
+            logger.info(f"  Loaded model: {fname}")
+            boosters[zone] = booster
+        _load_models_cache["load"] = boosters
     return _load_models_cache["load"]
 
 
@@ -82,12 +83,14 @@ def get_lmp_model():
 
 def predict_load(zone: str, feature_df: pd.DataFrame) -> pd.Series:
     """Run load forecast for a single zone. Returns Series indexed by timestamp."""
+    import xgboost as xgb
     models = get_load_models()
     if zone not in models:
         raise ValueError(f"No load model for zone '{zone}'. Available: {list(models)}")
-    model = models[zone]
+    booster = models[zone]
     X = feature_df[LOAD_FEATURE_COLS].ffill().bfill()
-    preds = model.predict(X)
+    dmat = xgb.DMatrix(X)
+    preds = booster.predict(dmat)
     return pd.Series(preds, index=feature_df["timestamp"], name="load_forecast_mw")
 
 

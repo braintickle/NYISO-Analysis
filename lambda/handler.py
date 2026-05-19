@@ -176,15 +176,19 @@ def ingest_lmp(event: dict, context=None) -> dict:
         logger.info(f"  Fetching weather forecast {start_str} → {end_str}")
         weather = fetch_weather_forecast(start_str, end_str)
 
-        # 3. Load forecasts (NYC + LONGIL)
+        # 3. Load forecasts (NYC + LONGIL) — wrapped so LMP still runs if load fails
         load_written = {}
         for zone in ["N.Y.C.", "LONGIL"]:
-            feat_df = build_load_features(conn, target_ts, zone, weather)
-            preds   = predict_load(zone, feat_df)
-            n = write_load_forecast(conn, zone, target_ts, preds, MODEL_VERSION)
-            load_written[zone] = n
+            try:
+                feat_df = build_load_features(conn, target_ts, zone, weather)
+                preds   = predict_load(zone, feat_df)
+                n = write_load_forecast(conn, zone, target_ts, preds, MODEL_VERSION)
+                load_written[zone] = n
+            except Exception as load_exc:
+                logger.warning(f"  load forecast {zone} failed (skipping): {load_exc}")
+                load_written[zone] = 0
 
-        # 4. LMP forecast (NYC)
+        # 4. LMP forecast (NYC) — always runs regardless of load forecast outcome
         lmp_feat_df = build_lmp_features(conn, target_ts, "N.Y.C.", weather)
         lmp_preds   = predict_lmp(lmp_feat_df)
         lmp_written = write_lmp_forecast(conn, "N.Y.C.", target_ts, lmp_preds, MODEL_VERSION)
