@@ -210,7 +210,6 @@ with st.sidebar:
         st.warning("Using synthetic data.")
     st.markdown("---")
     st.caption("Zone: **N.Y.C. (Zone J)** · Last 365 days")
-    st.caption("Refreshes every 5 min")
     st.markdown(
         "Data: [NYISO public CSV API](https://www.nyiso.com/custom-reports)"
     )
@@ -219,7 +218,7 @@ with st.sidebar:
 # ── Header ────────────────────────────────────────────────────────────────────
 
 st.title("NYC Zone J BESS Optimizer")
-st.caption(f"N.Y.C. (Zone J) · Last 365 days · {source_label} · Refreshes every 5 min")
+st.caption(f"N.Y.C. (Zone J) · Last 365 days · {source_label}")
 
 # ── KPI Cards — Today's Projections ──────────────────────────────────────────
 
@@ -232,23 +231,23 @@ k1, k2, k3, k4 = st.columns(4)
 
 with k1:
     val = f"{today_load_f['load_forecast_mw'].max():,.0f} MW" \
-          if not today_load_f.empty else "—"
-    st.metric("Proj. Peak Load", val)
+          if not today_load_f.empty else "Updating..."
+    st.metric("Projected Peak Load", val)
 
 with k2:
     val = f"{today_load_f['load_forecast_mw'].sum():,.0f} MWh" \
-          if not today_load_f.empty else "—"
-    st.metric("Proj. Total Load", val)
+          if not today_load_f.empty else "Updating..."
+    st.metric("Projected Total Load", val)
 
 with k3:
     val = f"${today_lmp_f['lmp_forecast'].mean():.2f}/MWh" \
-          if not today_lmp_f.empty else "—"
-    st.metric("Proj. Avg LMP", val)
+          if not today_lmp_f.empty else "Updating..."
+    st.metric("Projected Avg LMP", val)
 
 with k4:
     val = f"${today_lmp_f['lmp_forecast'].max():.2f}/MWh" \
-          if not today_lmp_f.empty else "—"
-    st.metric("Proj. Peak LMP", val)
+          if not today_lmp_f.empty else "Updating..."
+    st.metric("Projected Peak LMP", val)
 
 if today_lmp_f.empty and today_load_f.empty:
     st.caption("Today's projections not yet available — Lambda writes forecasts hourly.")
@@ -258,7 +257,7 @@ st.markdown("---")
 
 # ── N.Y.C. Load — Actual vs Forecast ─────────────────────────────────────────
 
-st.subheader("N.Y.C. Load — Actual vs Forecast")
+st.subheader("Actual vs Forecast — N.Y.C. Load")
 
 fig_load = go.Figure()
 if not df_load.empty:
@@ -300,7 +299,7 @@ st.markdown("---")
 
 # ── LMP Forecast vs Actual ────────────────────────────────────────────────────
 
-st.subheader("LMP Forecast vs Actual — N.Y.C. DA")
+st.subheader("Actual vs Forecast — N.Y.C. DA LMP")
 
 if not df_lmp_fcst.empty:
     fig_lf = go.Figure()
@@ -518,48 +517,29 @@ if rev_df.empty:
     )
 else:
     n_days   = len(rev_df)
-    latest   = pd.to_datetime(rev_df["date"]).max()
     pf_total = float(rev_df["perfect_foresight_revenue"].sum())
     nv_total = float(rev_df["naive_revenue"].sum())
     pf_daily = pf_total / n_days
     nv_daily = nv_total / n_days
-
-    # Our Optimizer column — only shown if lmp_forecast data has been populated
-    lp_rows  = rev_df.dropna(subset=["lp_revenue"])
-    has_lp   = not lp_rows.empty
-
-    if has_lp:
-        lp_total = float(lp_rows["lp_revenue"].sum())
-        lp_n     = len(lp_rows)
-        lp_daily = lp_total / lp_n
-        nv_same  = float(rev_df.loc[rev_df["lp_revenue"].notna(), "naive_revenue"].sum())
-        pf_same  = float(rev_df.loc[rev_df["lp_revenue"].notna(), "perfect_foresight_revenue"].sum())
-        our_col  = [
-            f"${lp_total:,.0f}  ({lp_n}d)",
-            f"${lp_daily:,.0f}",
-            f"+{(lp_total/nv_same - 1)*100:.1f}%" if nv_same > 0 else "—",
-            f"{(lp_total/pf_same - 1)*100:+.1f}%" if pf_same > 0 else "—",
-        ]
-    else:
-        our_col = ["Populating…", "—", "—", "—"]
+    date_min = pd.to_datetime(rev_df["date"]).min().strftime("%Y-%m-%d")
+    date_max = pd.to_datetime(rev_df["date"]).max().strftime("%Y-%m-%d")
 
     table = pd.DataFrame(
         {
-            "Our Optimizer":          our_col,
             "Perfect Foresight (LP)": [
-                f"${pf_total:,.0f}  ({n_days}d)",
+                f"${pf_total:,.0f}",
                 f"${pf_daily:,.0f}",
                 f"+{(pf_total/nv_total - 1)*100:.1f}%" if nv_total > 0 else "—",
                 "—",
             ],
             "Naive Strategy": [
-                f"${nv_total:,.0f}  ({n_days}d)",
+                f"${nv_total:,.0f}",
                 f"${nv_daily:,.0f}",
                 "—",
                 f"{(nv_total/pf_total - 1)*100:.1f}%" if pf_total > 0 else "—",
             ],
-            "2025 Backtest": [
-                f"${_NB_LP:,.0f}  ({_NB_DAYS}d)",
+            "BESS Optimizer": [
+                f"${_NB_LP:,.0f}",
                 f"${_NB_LP // _NB_DAYS:,.0f}",
                 f"+{(_NB_LP/_NB_NAIVE - 1)*100:.1f}%",
                 "reference",
@@ -569,11 +549,10 @@ else:
     )
     st.dataframe(table, use_container_width=True)
     st.caption(
-        f"Last updated {latest.strftime('%Y-%m-%d')} · Lambda runs daily at 10am ET · "
-        "Our Optimizer: LP on XGBoost forecast, evaluated at actual DA prices · "
+        f"Live data: {date_min} — {date_max} ({n_days} days) · "
         "Perfect Foresight: LP on actual DA prices · "
-        "Naive: charge 0–6am, discharge 2–6pm · "
-        "2025 Backtest includes ICAP revenue"
+        "Naive: charge 0–6 AM, discharge 2–6 PM · "
+        "BESS Optimizer: 2025 full-year backtest with ICAP revenue"
     )
 
 st.markdown("---")

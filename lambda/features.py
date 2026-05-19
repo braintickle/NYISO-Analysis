@@ -126,7 +126,7 @@ def _fetch_load_history(conn, zone: str, oldest_needed: datetime) -> pd.Series:
         """, (zone, oldest_needed))
         rows = cur.fetchall()
     if not rows:
-        return pd.Series(dtype=float)
+        return pd.Series(dtype=float, index=pd.DatetimeIndex([]))
     df = pd.DataFrame(rows, columns=["timestamp", "load_mw"])
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     return df.set_index("timestamp")["load_mw"].sort_index()
@@ -141,7 +141,7 @@ def _fetch_lmp_history(conn, zone: str, oldest_needed: datetime) -> pd.Series:
         """, (zone, oldest_needed))
         rows = cur.fetchall()
     if not rows:
-        return pd.Series(dtype=float)
+        return pd.Series(dtype=float, index=pd.DatetimeIndex([]))
     df = pd.DataFrame(rows, columns=["timestamp", "lmp_total"])
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     return df.set_index("timestamp")["lmp_total"].sort_index()

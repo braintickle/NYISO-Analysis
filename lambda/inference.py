@@ -22,8 +22,8 @@ from features import LOAD_FEATURE_COLS, LMP_FEATURE_COLS
 logger = logging.getLogger(__name__)
 
 # Resolve model directory: /var/task/models/ in Lambda, ./models/ locally
-_REPO_ROOT = Path(__file__).parent.parent
-MODEL_DIR = Path(os.environ.get("MODEL_DIR", str(_REPO_ROOT / "models")))
+# In Lambda, __file__ is /var/task/inference.py so models live at /var/task/models/
+MODEL_DIR = Path(os.environ.get("MODEL_DIR", str(Path(__file__).parent / "models")))
 
 
 # ── Model loading ──────────────────────────────────────────────────────────────
@@ -45,6 +45,7 @@ _load_models_cache: dict = {}
 
 def get_load_models() -> dict:
     """Return {zone: model} dict for load forecasting (cached after first load)."""
+    import xgboost as xgb  # noqa — ensures xgboost is imported (with scipy mock already in place)
     global _load_models_cache
     if "load" not in _load_models_cache:
         _load_models_cache["load"] = {
@@ -55,10 +56,25 @@ def get_load_models() -> dict:
 
 
 def get_lmp_model():
-    """Return LMP XGBoost model for N.Y.C. (cached after first load)."""
+    """Return LMP XGBoost Booster for N.Y.C. (cached after first load).
+
+    Uses the native XGBoost binary format (.ubj) so sklearn is not required
+    at Lambda inference time.  lmp_r1_production.ubj is the rolling R1
+    production model (MAPE 11.60%), trained without gas features.
+    """
+    import xgboost as xgb
     global _load_models_cache
     if "lmp" not in _load_models_cache:
-        _load_models_cache["lmp"] = _load_model("lmp_model_nyc.joblib")
+        path = MODEL_DIR / "lmp_r1_production.ubj"
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Model not found: {path}. "
+                "Run scripts/export_models.py to generate model artifacts."
+            )
+        booster = xgb.Booster()
+        booster.load_model(str(path))
+        logger.info("  Loaded model: lmp_r1_production.ubj")
+        _load_models_cache["lmp"] = booster
     return _load_models_cache["lmp"]
 
 
@@ -77,9 +93,11 @@ def predict_load(zone: str, feature_df: pd.DataFrame) -> pd.Series:
 
 def predict_lmp(feature_df: pd.DataFrame) -> pd.Series:
     """Run LMP forecast for N.Y.C. Returns Series indexed by timestamp."""
-    model = get_lmp_model()
+    import xgboost as xgb
+    booster = get_lmp_model()
     X = feature_df[LMP_FEATURE_COLS].ffill().bfill()
-    preds = model.predict(X)
+    dmat = xgb.DMatrix(X)
+    preds = booster.predict(dmat)
     return pd.Series(preds, index=feature_df["timestamp"], name="lmp_forecast")
 
 

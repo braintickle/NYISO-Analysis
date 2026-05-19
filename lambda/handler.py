@@ -32,6 +32,53 @@ import os
 import sys
 from datetime import datetime, timezone
 
+# XGBoost 1.x imports scipy.sparse unconditionally at the top of xgboost/core.py.
+# scipy is not in the Lambda layer (stripped to stay within the 250 MB limit).
+# We install a minimal stub so xgboost's import succeeds; the stub causes all
+# scipy.sparse.issparse() checks to return False, which is correct because our
+# feature matrices are always dense numpy arrays / pandas DataFrames.
+try:
+    import scipy.sparse  # noqa — works fine if scipy is present
+except ImportError:
+    # scipy is stripped from the Lambda layer (saves ~100 MB).
+    # XGBoost 1.x imports scipy.sparse unconditionally; sklearn's predict path
+    # also touches scipy.special.  Provide proper ModuleType stubs so that
+    # Python treats scipy as a package (SimpleNamespace fails the package check).
+    from types import ModuleType
+    _scipy = ModuleType("scipy")
+    _scipy.__path__ = []          # mark as package so sub-imports succeed
+    _scipy.__spec__ = None
+    _scipy_sparse = ModuleType("scipy.sparse")
+    _scipy_sparse.issparse = lambda x: False
+    _scipy_sparse.spmatrix = type("spmatrix", (), {})
+    _scipy_sparse.csr_matrix = type("csr_matrix", (), {})
+    _scipy_sparse.csc_matrix = type("csc_matrix", (), {})
+    _scipy_sparse.coo_matrix = type("coo_matrix", (), {})
+    _scipy_special = ModuleType("scipy.special")
+    # xgboost/sklearn.py imports softmax + expit at module level (used for
+    # predict_proba in classifiers; not called during regression predict).
+    def _softmax(x, axis=None):
+        import numpy as _np
+        x = _np.asarray(x, dtype=float)
+        e = _np.exp(x - _np.max(x, axis=axis, keepdims=True))
+        return e / e.sum(axis=axis, keepdims=True)
+    def _expit(x):
+        import numpy as _np
+        return 1.0 / (1.0 + _np.exp(-_np.asarray(x, dtype=float)))
+    _scipy_special.softmax = _softmax
+    _scipy_special.expit = _expit
+    _scipy_linalg = ModuleType("scipy.linalg")
+    _scipy_stats = ModuleType("scipy.stats")
+    _scipy.sparse = _scipy_sparse
+    _scipy.special = _scipy_special
+    _scipy.linalg = _scipy_linalg
+    _scipy.stats = _scipy_stats
+    sys.modules.setdefault("scipy", _scipy)
+    sys.modules.setdefault("scipy.sparse", _scipy_sparse)
+    sys.modules.setdefault("scipy.special", _scipy_special)
+    sys.modules.setdefault("scipy.linalg", _scipy_linalg)
+    sys.modules.setdefault("scipy.stats", _scipy_stats)
+
 import psycopg2
 from dotenv import load_dotenv
 
@@ -329,6 +376,111 @@ def compute_revenue_summary(event: dict, context=None) -> dict:
             conn.close()
 
 
+# ── Handler: historical forecast backfill ─────────────────────────────────────
+
+def backfill_forecasts(event: dict, context=None) -> dict:
+    """
+    Backfill lmp_forecast and load_forecast for historical dates using ERA5 archive weather.
+
+    Call with: {"task": "backfill_forecasts", "start_date": "2026-01-01", "end_date": "2026-01-31"}
+    Defaults to 2026-01-01 through yesterday.
+
+    Uses Open-Meteo archive API for older dates and the forecast API for the
+    most recent 7 days (where ERA5 reanalysis may not yet be available).
+    """
+    import pandas as pd
+    from datetime import date, timedelta
+    from features import (
+        fetch_weather_archive,
+        fetch_weather_forecast,
+        build_load_features,
+        build_lmp_features,
+    )
+    from inference import (
+        predict_load, predict_lmp,
+        write_load_forecast, write_lmp_forecast, backfill_forecast_actuals,
+    )
+
+    logger.info("=== backfill_forecasts START ===")
+    conn = None
+    try:
+        conn = _get_conn()
+
+        today = date.today()
+        start_date = date.fromisoformat(event.get("start_date", "2026-01-01"))
+        end_date   = date.fromisoformat(event.get("end_date", (today - timedelta(days=1)).isoformat()))
+        logger.info(f"  Range: {start_date} → {end_date}")
+
+        # Backfill missing load_actual data (needed for lag features).
+        # Uses n_months_back=6 to cover Jan–Jun 2026 from a single Lambda invocation.
+        from ingest import ingest_load
+        logger.info("  Backfilling load_actual (n_months_back=6)...")
+        load_counts = ingest_load(conn, n_months_back=6)
+        logger.info(f"  load_actual backfill: {load_counts}")
+
+        # ERA5 archive has a ~5-7 day lag; use forecast API for recent days
+        archive_cutoff = today - timedelta(days=7)
+        archive_end  = min(end_date, archive_cutoff)
+        recent_start = archive_cutoff + timedelta(days=1)
+
+        weather_parts = []
+        if archive_end >= start_date:
+            logger.info(f"  Fetching archive weather {start_date} → {archive_end}")
+            weather_parts.append(fetch_weather_archive(start_date.isoformat(), archive_end.isoformat()))
+        if recent_start <= end_date:
+            logger.info(f"  Fetching forecast weather {recent_start} → {end_date}")
+            weather_parts.append(fetch_weather_forecast(recent_start.isoformat(), end_date.isoformat()))
+
+        weather = pd.concat(weather_parts, ignore_index=True) if weather_parts else pd.DataFrame()
+        logger.info(f"  Weather rows fetched: {len(weather)}")
+
+        lmp_total  = 0
+        load_total = {"N.Y.C.": 0, "LONGIL": 0}
+
+        current = start_date
+        while current <= end_date:
+            midnight_et = pd.Timestamp(current).tz_localize("US/Eastern")
+            target_ts   = pd.date_range(start=midnight_et, periods=24, freq="h")
+
+            for zone in ["N.Y.C.", "LONGIL"]:
+                try:
+                    feat  = build_load_features(conn, target_ts, zone, weather)
+                    preds = predict_load(zone, feat)
+                    n = write_load_forecast(conn, zone, target_ts, preds, MODEL_VERSION)
+                    load_total[zone] += n
+                except Exception as exc:
+                    logger.warning(f"  load {zone} {current}: {exc}")
+
+            try:
+                lmp_feat  = build_lmp_features(conn, target_ts, "N.Y.C.", weather)
+                lmp_preds = predict_lmp(lmp_feat)
+                n = write_lmp_forecast(conn, "N.Y.C.", target_ts, lmp_preds, MODEL_VERSION)
+                lmp_total += n
+            except Exception as exc:
+                logger.warning(f"  lmp N.Y.C. {current}: {exc}")
+
+            if current.day == 1:
+                logger.info(f"  Progress: {current}")
+            current += timedelta(days=1)
+
+        backfill_forecast_actuals(conn)
+
+        result = {
+            "start_date": start_date.isoformat(),
+            "end_date":   end_date.isoformat(),
+            "lmp_forecast_rows":  lmp_total,
+            "load_forecast_rows": load_total,
+        }
+        logger.info(f"=== backfill_forecasts DONE: {result} ===")
+        return _ok(result)
+
+    except Exception as exc:
+        return _err("backfill_forecasts failed", exc)
+    finally:
+        if conn:
+            conn.close()
+
+
 # ── Handler: Cloudflare DNS update (ECS Task State Change) ───────────────────
 
 def update_dns(event: dict, context=None) -> dict:
@@ -423,6 +575,7 @@ def lambda_handler(event: dict, context=None) -> dict:
         "ingest_lmp":              ingest_lmp,
         "bess_dispatch":           run_bess_dispatch,
         "compute_revenue_summary": compute_revenue_summary,
+        "backfill_forecasts":      backfill_forecasts,
         "update_dns":              update_dns,
     }
 

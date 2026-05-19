@@ -130,7 +130,7 @@ def naive_daily_revenue(lmp_hourly: pd.Series) -> float:
             SOC = min(SOC_MAX_MWH, SOC + c * EFF_CHARGE)
             rev -= c * p
         elif 14 <= h < 18:
-            d = max(0.0, min(MAX_POWER_MW, (SOC - SOC_MIN_MWH) * EFF_DISCHARGE))
+            d = max(0.0, min(MAX_POWER_MW, (SOC - SOC_INIT_MWH) * EFF_DISCHARGE))
             SOC = max(SOC_MIN_MWH, SOC - d / EFF_DISCHARGE)
             rev += d * p
     return float(rev)

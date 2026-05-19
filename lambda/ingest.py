@@ -100,7 +100,11 @@ def _clean_load(frames: list[pd.DataFrame]) -> pd.DataFrame:
     )
     df = df.dropna(subset=["timestamp"])
 
-    zone_col  = next((c for c in df.columns if "name" in c.lower() or "zone" in c.lower()), None)
+    # "Name" column holds zone names (N.Y.C., LONGIL, etc.); "Time Zone" holds EDT/EST.
+    # Must match "Name" exactly before "zone" in c.lower() would match "Time Zone".
+    zone_col  = next((c for c in df.columns if c.strip().lower() == "name"), None)
+    if zone_col is None:
+        zone_col = next((c for c in df.columns if "name" in c.lower() or "zone" in c.lower()), None)
     ptid_col  = next((c for c in df.columns if "ptid" in c.lower()), None)
     load_col  = next((c for c in df.columns if c.strip().lower() == "load" or ("load" in c.lower() and "mw" in c.lower())), None)
 
