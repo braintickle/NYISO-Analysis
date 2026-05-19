@@ -213,6 +213,8 @@ EventBridge (ECS Task State Change → Lambda → Cloudflare API)
 | `ingest_load_fuel` | Fetch load_actual + fuel_mix, insert to Postgres | Every 5 min |
 | `ingest_lmp` | Fetch DA+RT LMP, run XGBoost forecasts, write forecasts | Every hour |
 | `bess_dispatch` | Fetch today's DA LMP, LP optimize, write bess_dispatch | Daily 9am ET |
+| `compute_revenue_summary` | Compute naive + PF revenue from bess_dispatch, write summary | Manual / daily |
+| `backfill_forecasts` | Fetch historical actuals + weather, run forecasts for date range | Manual invoke |
 | *(ECS event)* | `update_dns` — patch Cloudflare A record with new task IP | ECS task RUNNING |
 
 ### Lambda Layer Notes
@@ -238,33 +240,68 @@ GitHub Secrets required: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `DATABASE
 ### Known Issues Fixed During Deployment
 
 1. **Lambda column detection bugs** (`lambda/ingest.py`):
-   - `_clean_load`: NYISO `pal` CSV has column `"Load"` (not `"Load MW"`) — fixed detector to match bare `"Load"`
+   - `_clean_load` zone_col: NYISO `pal` CSV columns are `Time Stamp, Time Zone, Name, PTID, Load`. "Time Zone" (EDT/EST) matches `"zone" in c.lower()` before "Name" (zone names). Fix: exact match `c.strip().lower() == "name"` first. Old bug stored zone='EDT'/'EST' and ON CONFLICT discarded all but first zone per timestamp.
+   - `_clean_load` load_col: NYISO `pal` CSV has column `"Load"` (not `"Load MW"`) — fixed detector to match bare `"Load"`
    - `_clean_lmp`: NYISO LMP CSV has column `"LBMP ($/MWHr)"` — fixed detector from exact match `"lbmp"` to `"lbmp" in column.lower()`
    - `_bulk_insert`: numpy int64 scalars not serializable by psycopg2 — added `_to_native()` converter
 
-2. **Postgres query window** (`app/app.py`):
+2. **Lambda MODEL_DIR** (`lambda/inference.py`):
+   - `Path(__file__).parent.parent / "models"` resolved to `/var/models/` in Lambda (not `/var/task/models/`)
+   - Fixed to `Path(__file__).parent / "models"` = `/var/task/models/`
+
+3. **LMP model** (`lambda/inference.py`):
+   - `lmp_model_nyc.joblib` (sklearn XGBRegressor) requires scipy at inference time
+   - Switched to `lmp_r1_production.ubj` (native XGBoost booster, MAPE 11.60% vs 12.89%)
+   - Uses `xgb.Booster()` + `xgb.DMatrix()` — no sklearn/scipy needed
+
+4. **scipy mock in Lambda** (`lambda/handler.py`):
+   - XGBoost 1.x imports `scipy.sparse` at module level in `xgboost/core.py`
+   - `xgboost/sklearn.py` imports `from scipy.special import softmax, expit` at module level
+   - Mock must use `types.ModuleType` with `__path__ = []` (not SimpleNamespace — Python won't resolve sub-imports from non-package objects)
+   - Mock must provide `softmax`, `expit`, and stubs for `scipy.linalg`, `scipy.stats`
+
+5. **Empty Series RangeIndex** (`lambda/features.py`):
+   - `_fetch_load_history` / `_fetch_lmp_history` returned `pd.Series(dtype=float)` (RangeIndex) for 0 rows
+   - `hist.index < ts` (Timestamp comparison) fails on RangeIndex
+   - Fixed: return `pd.Series(dtype=float, index=pd.DatetimeIndex([]))`
+
+6. **Naive BESS revenue bug** (`lambda/bess_dispatch.py`):
+   - Discharge limit used `SOC - SOC_MIN_MWH` (40 MWh floor), allowing 160 MWh of initial charge to be consumed
+   - LP has terminal constraint `s[T-1] >= SOC_INIT_MWH = 200`, so naive was earning more than perfect foresight
+   - Fixed to `SOC - SOC_INIT_MWH` (200 MWh floor)
+
+7. **Postgres query window** (`app/app.py`):
    - Original 90-day cutoff excluded all 2024–2025 historical data (>18 months old)
    - Extended to 548 days to cover full dataset; tighten back to 90 days once Lambda has built up 3 months of live data
 
-3. **Streamlit multiselect crash** (`app/app.py` line 186):
+8. **Streamlit multiselect crash** (`app/app.py`):
    - Default zones `["N.Y.C.", "LONGIL", "CAPITL"]` crashed when `df_load` was empty
    - Fixed: filter defaults to zones that exist in loaded data, fall back to first 3 available
 
-4. **Lambda layer size**: 430MB → 234MB by removing scipy + sklearn (not needed at inference time)
+9. **Lambda layer size**: 430MB → 234MB by removing scipy + sklearn (not needed at inference time)
 
-5. **ECS CloudWatch log group**: `setup_ecs.sh` silently failed to create `/ecs/nyiso-dashboard` due to Git Bash expanding `/ecs/` as a Windows path — created via boto3 instead
+10. **ECS CloudWatch log group**: `setup_ecs.sh` silently failed to create `/ecs/nyiso-dashboard` due to Git Bash expanding `/ecs/` as a Windows path — created via boto3 instead
 
-6. **IAM permissions discovered incrementally**:
-   - `lambda:GetLayerVersion` must target versioned ARN `layer:nyiso-*:*`
-   - `lambda:InvokeFunction` needed for smoke testing
-   - `ec2:DescribeNetworkInterfaces` needed on `nyiso-lambda-role` (execution role, not deploy user)
-   - ECS service-linked role `AWSServiceRoleForECS` must exist before `create-cluster` with capacity providers
+11. **IAM permissions discovered incrementally**:
+    - `lambda:GetLayerVersion` must target versioned ARN `layer:nyiso-*:*`
+    - `lambda:InvokeFunction` needed for smoke testing
+    - `ec2:DescribeNetworkInterfaces` needed on `nyiso-lambda-role` (execution role, not deploy user)
+    - ECS service-linked role `AWSServiceRoleForECS` must exist before `create-cluster` with capacity providers
+
+12. **Windows zip path separator** (`build_lambda.py`):
+    - `str(Path("models/file.joblib"))` = `"models\\file.joblib"` on Windows — Lambda (Linux) needs forward slashes
+    - Fixed: `f.as_posix()` in build_lambda.py for all model files
 
 ### Data Backfill
 
-`scripts/backfill_2026.py` — one-time script that fetched Jan 1 – May 17, 2026 for all 4 datasets and inserted into Supabase. Reuses `_fetch_zip`, `_clean_*`, and `_bulk_insert` from `lambda/ingest.py` directly (no code duplication).
+`scripts/backfill_2026.py` — one-time script that fetched Jan 1 – May 17, 2026 for all 4 datasets and inserted into Supabase. **WARNING: had the zone_col bug** — stored 40,219 load_actual rows with zone='EDT'/'EST' instead of 'N.Y.C.'/'LONGIL'. Fixed by `fix_load_zones.py` (delete + re-ingest).
 
-Results: 40,219 load_actual rows, 49,665 lmp_dayahead rows, 49,305 lmp_realtime rows, 185,066 fuel_mix rows (fuel_mix was already populated by Lambda).
+`fix_load_zones.py` (root, not committed) — deleted 58K corrupted load_actual rows (zone IN ('EDT','EST')), re-fetched 7 months with fixed zone detection.
+
+`backfill_forecasts` Lambda task — invoked manually after fix to write load + LMP forecasts for 2026:
+- Jan–Feb 2026: 1416 LMP + 1416 N.Y.C. + 1416 LONGIL load forecast rows
+- Mar–Apr 2026: 1464 LMP + 1464 N.Y.C. + 1464 LONGIL load forecast rows
+- May 1–17, 2026: 408 LMP + 408 N.Y.C. + 408 LONGIL load forecast rows
 
 ## Conventions
 
@@ -280,18 +317,9 @@ Results: 40,219 load_actual rows, 49,665 lmp_dayahead rows, 49,305 lmp_realtime 
 ## Deploying Lambda Updates
 
 ```bash
-# 1. Rebuild function zip (Python, from repo root)
+# 1. Rebuild function zip using build_lambda.py (handles POSIX paths for models/)
 conda activate nyiso
-python -c "
-import zipfile
-from pathlib import Path
-z = zipfile.ZipFile('nyiso-function.zip', 'w', zipfile.ZIP_DEFLATED, compresslevel=6)
-for f in ['lambda/handler.py','lambda/ingest.py','lambda/features.py','lambda/inference.py','lambda/bess_dispatch.py']:
-    z.write(f, Path(f).name)
-for f in Path('models').rglob('*'):
-    z.write(f, str(f))
-z.close()
-"
+python build_lambda.py
 
 # 2. Push code update
 aws lambda update-function-code \
