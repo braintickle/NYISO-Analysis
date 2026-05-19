@@ -97,21 +97,47 @@ jobs:
           CF_ZONE_ID:   ${{ secrets.CF_ZONE_ID }}
           NEW_IP:       ${{ steps.get-ip.outputs.ip }}
         run: |
-          # Look up the A record ID for nyiso.rahishah.com
-          RECORD=$(curl -s -X GET \
+          # Fail-safe: skip gracefully if secrets not configured yet
+          if [ -z "${CF_API_TOKEN}" ] || [ -z "${CF_ZONE_ID}" ]; then
+            echo "CF_API_TOKEN or CF_ZONE_ID not set in GitHub Secrets — skipping DNS update."
+            echo "Add both in: Settings → Secrets and variables → Actions"
+            exit 0
+          fi
+
+          # Look up A record for nyiso.rahishah.com
+          LIST_RESP=$(curl -s -X GET \
             "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records?name=nyiso.rahishah.com&type=A" \
             -H "Authorization: Bearer ${CF_API_TOKEN}" \
             -H "Content-Type: application/json")
-          RECORD_ID=$(echo "${RECORD}" | python3 -c "import sys,json; print(json.load(sys.stdin)['result'][0]['id'])")
-          OLD_IP=$(echo "${RECORD}" | python3 -c "import sys,json; print(json.load(sys.stdin)['result'][0]['content'])")
+          echo "Record lookup response: ${LIST_RESP}"
 
-          # Patch A record with new task IP
-          RESP=$(curl -s -X PATCH \
+          LIST_SUCCESS=$(echo "${LIST_RESP}" | python3 -c \
+            "import sys,json; d=json.load(sys.stdin); print(d.get('success',False))")
+          if [ "${LIST_SUCCESS}" != "True" ]; then
+            echo "Cloudflare API error — check CF_API_TOKEN and CF_ZONE_ID are correct."
+            exit 1
+          fi
+
+          RESULT_COUNT=$(echo "${LIST_RESP}" | python3 -c \
+            "import sys,json; print(len(json.load(sys.stdin).get('result') or []))")
+          if [ "${RESULT_COUNT}" = "0" ]; then
+            echo "No A record found for nyiso.rahishah.com in zone ${CF_ZONE_ID} — nothing to update."
+            exit 0
+          fi
+
+          RECORD_ID=$(echo "${LIST_RESP}" | python3 -c \
+            "import sys,json; print(json.load(sys.stdin)['result'][0]['id'])")
+          OLD_IP=$(echo "${LIST_RESP}" | python3 -c \
+            "import sys,json; print(json.load(sys.stdin)['result'][0]['content'])")
+
+          # Patch A record with new Fargate task public IP
+          PATCH_RESP=$(curl -s -X PATCH \
             "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records/${RECORD_ID}" \
             -H "Authorization: Bearer ${CF_API_TOKEN}" \
             -H "Content-Type: application/json" \
             --data "{\"content\": \"${NEW_IP}\"}")
-          SUCCESS=$(echo "${RESP}" | python3 -c "import sys,json; print(json.load(sys.stdin)['success'])")
+          PATCH_SUCCESS=$(echo "${PATCH_RESP}" | python3 -c \
+            "import sys,json; print(json.load(sys.stdin).get('success',False))")
 
-          echo "DNS updated: ${OLD_IP} → ${NEW_IP} (success=${SUCCESS})"
+          echo "DNS updated: ${OLD_IP} → ${NEW_IP} (success=${PATCH_SUCCESS})"
           echo "DNS: nyiso.rahishah.com → ${NEW_IP}" >> $GITHUB_STEP_SUMMARY
