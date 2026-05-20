@@ -292,6 +292,33 @@ GitHub Secrets required: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `DATABASE
     - `str(Path("models/file.joblib"))` = `"models\\file.joblib"` on Windows — Lambda (Linux) needs forward slashes
     - Fixed: `f.as_posix()` in build_lambda.py for all model files
 
+13. **Load feature 5-min vs hourly aggregation** (`lambda/features.py`):
+    - `_fetch_load_history` returned raw 5-min rows from `load_actual`
+    - `past.iloc[-24:]` spanned only 2 hours of data, producing wildly wrong `load_roll_mean_24h` and lag features
+    - Fix: SQL query now uses `SELECT date_trunc('hour', timestamp) AS ts_hour, AVG(load_mw)` with `GROUP BY 1`
+    - Result: load forecast MIN/MAX/AVG corrected from 2041 MW garbage → 3,779–9,899 MW (MAPE 2.59%)
+
+14. **UTC/Eastern timezone mismatch in Lambda** (`lambda/features.py`):
+    - `date_trunc('hour', timestamp)` returns UTC TIMESTAMPTZ; psycopg2 in Lambda layer returns tz-naive or UTC-aware
+    - `hist.index < ts` comparison fails when hist is UTC and ts is Eastern tz-aware (behavior varies by pandas version)
+    - Fix: normalize all history timestamps to Eastern after fetching:
+      `if tz is None: tz_localize("UTC").tz_convert("US/Eastern") else: tz_convert("US/Eastern")`
+    - Lambda layer version mismatch still causes issues → run backfills locally until layer is rebuilt
+
+15. **LMP model covariate shift** (`scripts/export_models.py`, `models/lmp_r1_production.ubj`):
+    - 2024-only training (avg LMP $39/MWh) severely underpredicted 2025 ($65/MWh) and 2026 ($92/MWh)
+    - Old model: MAPE 17.82% on 2026 holdout, avg_pred $70.91 vs actual $93.23
+    - Fix: retrained on 2024+2025 combined, holdout 2026. MAPE → 15.13%, avg_pred $81.31
+    - Dashboard MAPE: 10.56% overall (6.32% in 2025, 16.11% in 2026)
+    - export_models.py: fetches 2026 LMP from Postgres (not in parquet), shows before/after comparison
+
+16. **BESS strategy constraints standardization** (`lambda/bess_dispatch.py`):
+    - All three strategies (PF, LP optimizer, naive) now use identical physical constraints
+    - Terminal SOC constraint: SOC at hour 23 ≥ SOC_INIT_MWH (200 MWh) — applied to all three
+    - Naive discharge floor: `SOC - SOC_INIT_MWH` (not SOC_MIN_MWH) — prevents consuming initial charge
+    - Result: PF ≥ LP ≥ naive on all 365 days (0 exceptions)
+    - Note: naive earns only $96K/year (vs $5.57M in notebook) because the notebook naive used SOC_MIN floor — the notebook figures were misleading due to unequal constraints
+
 ### Data Backfill
 
 `scripts/backfill_2026.py` — one-time script that fetched Jan 1 – May 17, 2026 for all 4 datasets and inserted into Supabase. **WARNING: had the zone_col bug** — stored 40,219 load_actual rows with zone='EDT'/'EST' instead of 'N.Y.C.'/'LONGIL'. Fixed by `fix_load_zones.py` (delete + re-ingest).
@@ -302,6 +329,11 @@ GitHub Secrets required: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `DATABASE
 - Jan–Feb 2026: 1416 LMP + 1416 N.Y.C. + 1416 LONGIL load forecast rows
 - Mar–Apr 2026: 1464 LMP + 1464 N.Y.C. + 1464 LONGIL load forecast rows
 - May 1–17, 2026: 408 LMP + 408 N.Y.C. + 408 LONGIL load forecast rows
+
+**Local backfill scripts (bypass Lambda for version-incompatible layer):**
+- Load forecasts run locally (model_version=local-v1): 7,703 rows/zone, MAPE 2.59%
+- LMP forecasts run locally via `backfill_lmp_forecasts.py` (model_version=lmp-2024-2025-v1): 7,728 rows, MAPE 10.56%
+- Nov 2, 2025 DST ambiguous hour (01:00 ET) skipped on all backfills — expected behavior
 
 ## Conventions
 
@@ -363,13 +395,17 @@ print(f"http://{ip}:8501")
 - [x] CI/CD via GitHub Actions (`.github/workflows/deploy.yml`)
 - [x] Backfill 2026 data (`scripts/backfill_2026.py`)
 - [x] Stable HTTPS URL at `nyiso.rahishah.com` via Cloudflare + Lambda DNS auto-update
-- [ ] Fix `use_container_width` Streamlit deprecation warnings in `app/app.py` (removed after 2025-12-31)
+- [ ] Fix `use_container_width` Streamlit deprecation warnings in `app/app.py` (still valid in Streamlit 1.54; revisit when actually deprecated)
 - [ ] Tighten Postgres query window back to 90 days once Lambda has 3 months of live data
-- [ ] Retrain models on 2025+2026 data and redeploy Lambda
+- [x] Retrain LMP model on 2025+2026 data and redeploy Lambda (done 2026-05-20: MAPE 17.82% → 15.13% on 2026 holdout)
+- [x] Fix load feature 5-min vs hourly aggregation bug in Lambda (done 2026-05-20)
+- [x] Standardize BESS strategy constraints — all three use SOC_INIT terminal (done 2026-05-20)
+- [x] Update BESS constraints panel in app.py with two-column table layout (done 2026-05-20)
+- [ ] Rebuild Lambda layer with newer pandas/psycopg2 (current layer causes UTC/Eastern timezone mismatch → run backfills locally)
 
 ### Forecasting Improvements
 - [ ] Add solar generation feature for duck curve
-- [ ] Retrain LMP model with 2026 data (covariate shift from 2024 training)
+- [x] Retrain LMP model with 2025+2026 data — done, MAPE 10.56% on dashboard (6.32% in 2025, 16.11% in 2026)
 
 ### Other
 - [ ] Fix Plotly rendering in GitHub notebook viewer
