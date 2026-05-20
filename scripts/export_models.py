@@ -1,7 +1,7 @@
 """
-export_models.py — Train XGBoost models and save as .joblib artifacts.
+export_models.py — Train XGBoost models and save as .ubj artifacts.
 
-Reads from data/processed/ parquets (same as notebook 02).
+Reads from data/processed/ parquets (2024-2025) and Postgres (2026 holdout).
 Outputs to models/ in the repo root.
 
 Usage:
@@ -9,19 +9,20 @@ Usage:
     python scripts/export_models.py
 
 Outputs:
-    models/load_model_nyc.joblib    — XGBoost load model for N.Y.C.
-    models/load_model_longil.joblib — XGBoost load model for LONGIL
-    models/lmp_model_nyc.joblib     — XGBoost LMP model for N.Y.C. (rolling R1)
+    models/load_model_nyc.ubj       — XGBoost load model for N.Y.C.  (train 2024, test 2025)
+    models/load_model_longil.ubj    — XGBoost load model for LONGIL   (train 2024, test 2025)
+    models/lmp_r1_production.ubj    — XGBoost LMP model for N.Y.C.   (train 2024+2025, test 2026)
 """
 
 import logging
+import os
 import pathlib
 import sys
 
 import holidays
-import joblib
 import numpy as np
 import pandas as pd
+import psycopg2
 import requests
 from xgboost import XGBRegressor
 
@@ -33,8 +34,13 @@ DATA_DIR   = REPO_ROOT / "data" / "processed"
 MODEL_DIR  = REPO_ROOT / "models"
 MODEL_DIR.mkdir(exist_ok=True)
 
-TRAIN_YEAR = 2024
-TEST_YEAR  = 2025
+# Load model: train 2024, test 2025 (parquet covers both, MAPE 2.31% — no retrain needed)
+LOAD_TRAIN_YEAR = 2024
+LOAD_TEST_YEAR  = 2025
+
+# LMP model: train 2024+2025 (covariate shift fix), holdout 2026 from Postgres
+LMP_TRAIN_YEARS = [2024, 2025]
+LMP_TEST_YEAR   = 2026
 
 # ── Feature definitions (must match lambda/features.py exactly) ──────────────
 
@@ -69,6 +75,56 @@ WEATHER_PARAMS = {
 }
 
 
+# ── Postgres helpers ──────────────────────────────────────────────────────────
+
+def _load_db_url() -> str:
+    """Read DATABASE_URL from env or .env file."""
+    url = os.environ.get("DATABASE_URL")
+    if url:
+        return url
+    env_file = REPO_ROOT / ".env"
+    if env_file.exists():
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            if line.startswith("DATABASE_URL="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    raise RuntimeError("DATABASE_URL not set. Add it to .env or export it.")
+
+
+def fetch_2026_lmp_from_postgres() -> pd.DataFrame:
+    """Fetch 2026 DA LMP for N.Y.C. from Postgres (not in local parquets)."""
+    db_url = _load_db_url()
+    conn = psycopg2.connect(db_url)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT timestamp, lmp_total
+                FROM lmp_dayahead
+                WHERE zone = 'N.Y.C.'
+                  AND timestamp >= '2026-01-01'
+                ORDER BY timestamp
+            """)
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        raise RuntimeError("No 2026 LMP data found in Postgres. Run the ingest Lambda first.")
+
+    df = pd.DataFrame(rows, columns=["timestamp", "lmp_total"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    # Normalize timezone: Postgres returns UTC TIMESTAMPTZ
+    ts = df["timestamp"]
+    if ts.dt.tz is None:
+        df["timestamp"] = ts.dt.tz_localize("UTC").dt.tz_convert("US/Eastern")
+    else:
+        df["timestamp"] = ts.dt.tz_convert("US/Eastern")
+    df["zone"] = "N.Y.C."
+    logger.info(f"  2026 LMP from Postgres: {len(df):,} rows  "
+                f"({df['timestamp'].min().date()} → {df['timestamp'].max().date()})  "
+                f"avg=${df['lmp_total'].mean():.2f}/MWh")
+    return df
+
+
 # ── Weather fetchers ──────────────────────────────────────────────────────────
 
 def _parse_weather(data: dict) -> pd.DataFrame:
@@ -86,6 +142,7 @@ def _parse_weather(data: dict) -> pd.DataFrame:
 
 
 def fetch_weather_archive(start_date: str, end_date: str) -> pd.DataFrame:
+    """ERA5 reanalysis — used for training data (actual weather conditions)."""
     url = "https://archive-api.open-meteo.com/v1/archive"
     r = requests.get(url, params={**WEATHER_PARAMS, "start_date": start_date, "end_date": end_date}, timeout=60)
     r.raise_for_status()
@@ -93,7 +150,11 @@ def fetch_weather_archive(start_date: str, end_date: str) -> pd.DataFrame:
 
 
 def fetch_weather_forecast_hist(start_date: str, end_date: str) -> pd.DataFrame:
-    """Historical NWP forecast — eliminates leakage on test period."""
+    """Historical NWP forecast — used for test/holdout data to avoid leakage.
+
+    At inference time the model sees NWP forecasts, not ERA5 reanalysis.
+    Evaluating on historical NWP gives a realistic picture of production accuracy.
+    """
     url = "https://historical-forecast-api.open-meteo.com/v1/forecast"
     r = requests.get(url, params={**WEATHER_PARAMS, "start_date": start_date, "end_date": end_date}, timeout=60)
     r.raise_for_status()
@@ -159,12 +220,12 @@ def engineer_lmp_features(df_lmp: pd.DataFrame, weather: pd.DataFrame) -> pd.Dat
     df["CDD"] = (df["temp_f"] - BALANCE_LMP).clip(lower=0)
 
     df = df.sort_values("timestamp").reset_index(drop=True)
-    df["lmp_lag_24h"]      = df["lmp_total"].shift(24)
-    df["lmp_lag_48h"]      = df["lmp_total"].shift(48)
-    df["lmp_lag_168h"]     = df["lmp_total"].shift(168)
+    df["lmp_lag_24h"]       = df["lmp_total"].shift(24)
+    df["lmp_lag_48h"]       = df["lmp_total"].shift(48)
+    df["lmp_lag_168h"]      = df["lmp_total"].shift(168)
     df["lmp_roll_mean_24h"] = df["lmp_total"].shift(1).rolling(24).mean()
     df["lmp_roll_std_24h"]  = df["lmp_total"].shift(1).rolling(24).std()
-    df["lmp_spike_24h"]    = (df["lmp_lag_24h"] > df["lmp_lag_24h"].quantile(0.90)).astype(int)
+    df["lmp_spike_24h"]     = (df["lmp_lag_24h"] > df["lmp_lag_24h"].quantile(0.90)).astype(int)
 
     df = df.dropna(subset=LMP_FEATURE_COLS).reset_index(drop=True)
     logger.info(f"  LMP feature matrix: {df.shape[0]:,} rows × {df.shape[1]} columns")
@@ -190,13 +251,13 @@ XGB_PARAMS = dict(
 # ── Model training ─────────────────────────────────────────────────────────────
 
 def train_load_models(df_features: pd.DataFrame) -> dict:
-    """Train one XGBoost model per zone (NYC + LONGIL). Returns {zone: model}."""
+    """Train one XGBoost model per zone (NYC + LONGIL). Train 2024, test 2025."""
     models = {}
     for zone in ["N.Y.C.", "LONGIL"]:
         logger.info(f"  Training load model for {zone} ...")
         zone_df = df_features[df_features["zone"] == zone]
-        train = zone_df[zone_df["timestamp"].dt.year == TRAIN_YEAR]
-        test  = zone_df[zone_df["timestamp"].dt.year == TEST_YEAR]
+        train = zone_df[zone_df["timestamp"].dt.year == LOAD_TRAIN_YEAR]
+        test  = zone_df[zone_df["timestamp"].dt.year == LOAD_TEST_YEAR]
 
         X_train, y_train = train[LOAD_FEATURE_COLS], train["load_mw"]
         X_test,  y_test  = test[LOAD_FEATURE_COLS],  test["load_mw"]
@@ -212,27 +273,56 @@ def train_load_models(df_features: pd.DataFrame) -> dict:
     return models
 
 
-def train_lmp_model(df_lmp_features: pd.DataFrame):
+def train_lmp_model(df_lmp_features: pd.DataFrame) -> XGBRegressor:
     """
-    Train rolling R1 LMP model (no gas features, retrain every 30 days).
+    Train LMP model on 2024+2025 data, evaluate on 2026 holdout.
 
-    For the static export, we train on 2024 and evaluate on 2025 — the Lambda
-    will use this artifact until a retrain is triggered manually.
+    Shows "before" MAPE (current 2024-only model on 2026 data) vs "after" MAPE,
+    quantifying the improvement from adding 2025 training data.
+
+    The covariate shift: 2024 avg LMP=$39/MWh → 2025=$65/MWh → 2026=$92/MWh.
+    A 2024-only model chronically underpredicts because price lags and degree-day
+    features from 2025-2026 are out of the model's learned distribution.
     """
-    logger.info("  Training LMP model (rolling R1, no gas features) ...")
-    train = df_lmp_features[df_lmp_features["timestamp"].dt.year == TRAIN_YEAR]
-    test  = df_lmp_features[df_lmp_features["timestamp"].dt.year == TEST_YEAR]
+    import xgboost as xgb
+
+    logger.info("  Training LMP model (2024+2025 → 2026 holdout) ...")
+
+    train = df_lmp_features[df_lmp_features["timestamp"].dt.year.isin(LMP_TRAIN_YEARS)]
+    test  = df_lmp_features[df_lmp_features["timestamp"].dt.year == LMP_TEST_YEAR]
+
+    logger.info(f"    Train rows: {len(train):,}  ({', '.join(str(y) for y in LMP_TRAIN_YEARS)})")
+    logger.info(f"    Test rows:  {len(test):,}  (2026 holdout)")
+    logger.info(f"    Train avg LMP: ${train['lmp_total'].mean():.2f}/MWh")
+    logger.info(f"    Test  avg LMP: ${test['lmp_total'].mean():.2f}/MWh")
 
     X_train, y_train = train[LMP_FEATURE_COLS], train["lmp_total"]
     X_test,  y_test  = test[LMP_FEATURE_COLS],  test["lmp_total"]
 
+    # ── "Before" MAPE: current 2024-only model on 2026 holdout ──────────────
+    old_model_path = MODEL_DIR / "lmp_r1_production.ubj"
+    if old_model_path.exists():
+        old_booster = xgb.Booster()
+        old_booster.load_model(str(old_model_path))
+        old_preds = old_booster.predict(xgb.DMatrix(X_test))
+        old_mape = np.mean(np.abs((y_test.values - old_preds) / y_test.values)) * 100
+        old_mae  = np.mean(np.abs(y_test.values - old_preds))
+        logger.info(f"    BEFORE (2024-only model) on 2026 holdout:")
+        logger.info(f"      MAPE={old_mape:.2f}%  MAE=${old_mae:.2f}/MWh")
+        logger.info(f"      avg_pred=${np.mean(old_preds):.2f}  avg_actual=${np.mean(y_test.values):.2f}")
+    else:
+        logger.warning("    No existing model found — skipping 'before' MAPE comparison.")
+
+    # ── Train new model on 2024+2025 ────────────────────────────────────────
     model = XGBRegressor(**XGB_PARAMS)
     model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
 
-    preds = model.predict(X_test)
-    mape  = np.mean(np.abs((y_test.values - preds) / y_test.values)) * 100
-    mae   = np.mean(np.abs(y_test.values - preds))
-    logger.info(f"    NYC LMP MAPE: {mape:.2f}%  MAE: {mae:.2f} $/MWh  (n_test={len(X_test):,})")
+    new_preds = model.predict(X_test)
+    new_mape  = np.mean(np.abs((y_test.values - new_preds) / y_test.values)) * 100
+    new_mae   = np.mean(np.abs(y_test.values - new_preds))
+    logger.info(f"    AFTER (2024+2025 model) on 2026 holdout:")
+    logger.info(f"      MAPE={new_mape:.2f}%  MAE=${new_mae:.2f}/MWh")
+    logger.info(f"      avg_pred=${np.mean(new_preds):.2f}  avg_actual=${np.mean(y_test.values):.2f}")
 
     return model
 
@@ -240,13 +330,12 @@ def train_lmp_model(df_lmp_features: pd.DataFrame):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    # ── Load data ─────────────────────────────────────────────────────────────
+    # ── Load parquet data ─────────────────────────────────────────────────────
     logger.info("Loading parquet files ...")
     df_load = pd.read_parquet(DATA_DIR / "load_actual.parquet")
     df_lmp  = pd.read_parquet(DATA_DIR / "lmp_dayahead.parquet")
 
-    # Normalize column names
-    df_lmp = df_lmp.rename(columns={"PTID": "ptid"})
+    df_lmp  = df_lmp.rename(columns={"PTID": "ptid"})
     df_load = df_load.rename(columns={"PTID": "ptid"})
 
     # Hourly resample for load (5-min → hourly mean)
@@ -254,45 +343,64 @@ def main():
         df_load.groupby(["zone", pd.Grouper(key="timestamp", freq="h")])["load_mw"]
         .mean().reset_index()
     )
-    # Keep only NYC + LONGIL for load model
     df_load_hr = df_load_hr[df_load_hr["zone"].isin(["N.Y.C.", "LONGIL"])]
-    # LMP NYC only
     df_lmp_nyc = df_lmp[df_lmp["zone"] == "N.Y.C."].copy()
 
-    logger.info(f"  load_actual (hourly): {len(df_load_hr):,} rows")
-    logger.info(f"  lmp_dayahead (NYC):   {len(df_lmp_nyc):,} rows")
+    logger.info(f"  load_actual (hourly, parquet): {len(df_load_hr):,} rows  "
+                f"years={sorted(df_load_hr['timestamp'].dt.year.unique().tolist())}")
+    logger.info(f"  lmp_dayahead NYC (parquet):    {len(df_lmp_nyc):,} rows  "
+                f"years={sorted(df_lmp_nyc['timestamp'].dt.year.unique().tolist())}")
+
+    # ── Fetch 2026 LMP from Postgres for holdout ──────────────────────────────
+    logger.info("Fetching 2026 LMP from Postgres ...")
+    df_lmp_2026 = fetch_2026_lmp_from_postgres()
+
+    # Merge parquet (2024-2025) + Postgres (2026)
+    df_lmp_full = pd.concat([df_lmp_nyc, df_lmp_2026], ignore_index=True)
+    df_lmp_full = (df_lmp_full
+                   .drop_duplicates(subset=["timestamp"])
+                   .sort_values("timestamp")
+                   .reset_index(drop=True))
+    logger.info(f"  LMP full dataset: {len(df_lmp_full):,} rows  "
+                f"years={sorted(df_lmp_full['timestamp'].dt.year.unique().tolist())}")
 
     # ── Fetch weather ──────────────────────────────────────────────────────────
     logger.info("Fetching weather data ...")
-    weather_train = fetch_weather_archive("2024-01-01", "2024-12-31")
-    logger.info("  2024 archive fetched")
-    weather_test  = fetch_weather_forecast_hist("2025-01-01", "2025-12-31")
-    logger.info("  2025 historical forecast fetched")
-    weather = pd.concat([weather_train, weather_test], ignore_index=True)
 
-    # ── Load model ─────────────────────────────────────────────────────────────
+    # Training weather: ERA5 reanalysis (actual conditions, no leakage concern for train set)
+    weather_2024 = fetch_weather_archive("2024-01-01", "2024-12-31")
+    logger.info("  2024 archive fetched")
+
+    weather_2025 = fetch_weather_archive("2025-01-01", "2025-12-31")
+    logger.info("  2025 archive fetched")
+
+    # Holdout weather: historical NWP forecast (simulates real inference conditions — avoids leakage)
+    # ERA5 archive lags ~5 days, so use NWP for the recent 2026 period
+    weather_2026 = fetch_weather_forecast_hist("2026-01-01", "2026-05-18")
+    logger.info("  2026 historical NWP fetched")
+
+    weather_load = pd.concat([weather_2024, weather_2025], ignore_index=True)
+    weather_lmp  = pd.concat([weather_2024, weather_2025, weather_2026], ignore_index=True)
+
+    # ── Load model (train 2024, test 2025 — unchanged) ────────────────────────
     logger.info("Engineering load features ...")
-    df_load_feat = engineer_load_features(df_load_hr, weather)
+    df_load_feat = engineer_load_features(df_load_hr, weather_load)
 
     logger.info("Training load models ...")
     load_models = train_load_models(df_load_feat)
 
-    # Save as native XGBoost binary (.ubj) — version-stable across XGBoost major versions.
-    # joblib-serialized sklearn XGBRegressor breaks when local XGBoost version (3.2.x)
-    # differs from the Lambda layer version (3.0.x); .ubj avoids that entirely.
     load_models["N.Y.C."].get_booster().save_model(str(MODEL_DIR / "load_model_nyc.ubj"))
     logger.info(f"  Saved: {MODEL_DIR / 'load_model_nyc.ubj'}")
     load_models["LONGIL"].get_booster().save_model(str(MODEL_DIR / "load_model_longil.ubj"))
     logger.info(f"  Saved: {MODEL_DIR / 'load_model_longil.ubj'}")
 
-    # ── LMP model ──────────────────────────────────────────────────────────────
+    # ── LMP model (train 2024+2025, holdout 2026) ────────────────────────────
     logger.info("Engineering LMP features ...")
-    df_lmp_feat = engineer_lmp_features(df_lmp_nyc, weather)
+    df_lmp_feat = engineer_lmp_features(df_lmp_full, weather_lmp)
 
     logger.info("Training LMP model ...")
     lmp_model = train_lmp_model(df_lmp_feat)
 
-    # Overwrite the production .ubj used by Lambda inference (same filename as before).
     lmp_model.get_booster().save_model(str(MODEL_DIR / "lmp_r1_production.ubj"))
     logger.info(f"  Saved: {MODEL_DIR / 'lmp_r1_production.ubj'}")
 

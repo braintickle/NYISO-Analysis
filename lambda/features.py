@@ -118,17 +118,28 @@ def _merge_weather(df: pd.DataFrame, weather: pd.DataFrame) -> pd.DataFrame:
 # ── Postgres lag helpers ──────────────────────────────────────────────────────
 
 def _fetch_load_history(conn, zone: str, oldest_needed: datetime) -> pd.Series:
+    # Aggregate 5-min load_actual to hourly averages to match training features.
+    # Using 5-min rows raw causes past.iloc[-24:] to span only 2 hours (not 24),
+    # producing a wildly wrong load_roll_mean_24h and badly-scaled lags.
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT timestamp, load_mw FROM load_actual
+            SELECT date_trunc('hour', timestamp) AS ts_hour, AVG(load_mw) AS load_mw
+            FROM load_actual
             WHERE zone = %s AND timestamp >= %s
-            ORDER BY timestamp
+            GROUP BY 1 ORDER BY 1
         """, (zone, oldest_needed))
         rows = cur.fetchall()
     if not rows:
         return pd.Series(dtype=float, index=pd.DatetimeIndex([]))
     df = pd.DataFrame(rows, columns=["timestamp", "load_mw"])
     df["timestamp"] = pd.to_datetime(df["timestamp"])
+    # Normalize to Eastern tz-aware so _lag comparisons with target_ts work across pandas versions.
+    # date_trunc returns UTC TIMESTAMPTZ; psycopg2 may return tz-aware or tz-naive depending on version.
+    ts_col = df["timestamp"]
+    if ts_col.dt.tz is None:
+        df["timestamp"] = ts_col.dt.tz_localize("UTC").dt.tz_convert("US/Eastern")
+    else:
+        df["timestamp"] = ts_col.dt.tz_convert("US/Eastern")
     return df.set_index("timestamp")["load_mw"].sort_index()
 
 
@@ -144,6 +155,11 @@ def _fetch_lmp_history(conn, zone: str, oldest_needed: datetime) -> pd.Series:
         return pd.Series(dtype=float, index=pd.DatetimeIndex([]))
     df = pd.DataFrame(rows, columns=["timestamp", "lmp_total"])
     df["timestamp"] = pd.to_datetime(df["timestamp"])
+    ts_col = df["timestamp"]
+    if ts_col.dt.tz is None:
+        df["timestamp"] = ts_col.dt.tz_localize("UTC").dt.tz_convert("US/Eastern")
+    else:
+        df["timestamp"] = ts_col.dt.tz_convert("US/Eastern")
     return df.set_index("timestamp")["lmp_total"].sort_index()
 
 

@@ -440,14 +440,35 @@ st.header("BESS — NYC Zone J Dispatch")
 
 # Model Constraints
 st.subheader("Model Constraints")
-st.markdown("""
-- **Max Power:** 100 MW charge / 100 MW discharge
-- **Energy Capacity:** 400 MWh (4-hour duration battery)
-- **Round-trip Efficiency:** 85% RTE (√0.85 ≈ 92.2% on each leg)
-- **SOC Bounds:** 5–95% state of charge (20–380 MWh); initialized at 50% (200 MWh) each day
-- **Charge Derating:** Linear power derating above 80% SOC to protect battery longevity
-- **ICAP Revenue:** Real 2025 NYC Zone J strip auction prices; capacity commitment modeled in annual backtest
-""")
+col_phys, col_icap = st.columns(2)
+
+with col_phys:
+    st.info(
+        "**Battery Physical Constraints**\n\n"
+        "| Parameter | Value |\n"
+        "|-----------|-------|\n"
+        "| Power rating | 100 MW |\n"
+        "| Energy capacity | 400 MWh (4-hour) |\n"
+        "| Round-trip efficiency | 85% (√0.85 ≈ 92.2% each leg) |\n"
+        "| SOC bounds | 5–95% → 20–380 MWh usable |\n"
+        "| Starting SOC | 200 MWh (50% midpoint) |\n"
+        "| Terminal SOC | ≥ 200 MWh (must end ≥ 50%) |\n"
+        "| Charge derating | Linear reduction above 80% SOC (320 MWh) |"
+    )
+
+with col_icap:
+    st.info(
+        "**Capacity Market (ICAP) Assumptions**\n\n"
+        "| Parameter | Value |\n"
+        "|-----------|-------|\n"
+        "| Market | NYISO ICAP strip auction |\n"
+        "| Zone | NYC Zone J |\n"
+        "| Vintage | 2025 actual auction prices |\n"
+        "| Annual ICAP revenue | $5,552,542 |\n"
+        "| Daily rate applied | $15,212 / day |\n"
+        "| Basis | Paid for availability, not dispatch |\n"
+        "| Allocation | Equal across all three strategies |"
+    )
 
 # Today's Dispatch
 st.subheader(f"Today's Optimal Dispatch — {now_et.strftime('%m/%d/%y')}")
